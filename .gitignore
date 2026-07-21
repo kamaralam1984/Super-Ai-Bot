@@ -6,17 +6,26 @@ logs/*.log
 .env
 .env.*
 !.env.example
-storage/
-cache/
-uploads/
-temp/
-backups/
-models/
-embeddings/
-knowledge/
-plugins/
-connectors/
-config/
+# Anchored to the repo root (leading /) — these are RUNTIME_DIRECTORIES
+# (backend/src/config/paths.ts), created at the repo root by the
+# installer for actual application data. Unanchored, these same names
+# also matched *source* directories sharing the name at any depth
+# (backend/src/config/, backend/src/knowledge/,
+# backend/src/deployment/plugins/) and silently excluded real code from
+# every commit — caught only because a from-scratch Docker build (which
+# has nothing but what git actually tracked) failed with dozens of
+# "Cannot find module" errors for modules that plainly exist on disk.
+/storage/
+/cache/
+/uploads/
+/temp/
+/backups/
+/models/
+/embeddings/
+/knowledge/
+/plugins/
+/connectors/
+/config/
 *.tsbuildinfo
 .DS_Store
 coverage/
