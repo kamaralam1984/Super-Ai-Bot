@@ -19,6 +19,26 @@
   if (window.__kvlWidgetLoaded) return;
   window.__kvlWidgetLoaded = true;
 
+  // Soft-launch gate: before going public, the widget only renders for
+  // whoever visits with ?kvl_preview=1 once (typically the site owner,
+  // reviewing it live before real visitors see it) — that visit sets a
+  // localStorage flag so it keeps showing for that same browser on later
+  // visits too, without needing the query param every time. To actually
+  // go public, delete this whole block (down to the next comment) so the
+  // widget always renders — that's the one change needed.
+  var PREVIEW_STORAGE_KEY = "kvl_widget_preview";
+  try {
+    var params = new URLSearchParams(window.location.search);
+    if (params.get("kvl_preview") === "1") {
+      localStorage.setItem(PREVIEW_STORAGE_KEY, "1");
+    }
+    if (localStorage.getItem(PREVIEW_STORAGE_KEY) !== "1") return;
+  } catch (e) {
+    // localStorage blocked (private browsing, etc.) — fail closed, stay hidden.
+    return;
+  }
+  // ── end soft-launch gate ──
+
   var scriptEl =
     document.currentScript ||
     (function () {
