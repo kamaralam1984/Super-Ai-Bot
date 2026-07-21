@@ -271,3 +271,4 @@ installer's Completion screen "Open Dashboard" action reflects that
 honestly rather than linking to a page that doesn't
 exist yet.
 # Super-Ai-Bot
+# Super-bot
