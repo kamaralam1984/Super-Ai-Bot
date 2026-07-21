@@ -1,4 +1,17 @@
+# Shared-VPS deployment override — the base docker-compose.yml's nginx
+# service binds host ports 80/443 directly, which assumes this stack owns
+# the whole machine. On a VPS that already runs its own system-level
+# nginx on 80/443 for other sites (this deployment's actual situation),
+# this stack's own nginx needs to live on a private, non-conflicting port
+# instead, reachable only from localhost — the system nginx reverse-
+# proxies to it by hostname.
+#
+# The `!override` tag matters here: Compose's default merge behavior for
+# list-valued keys like `ports` is to APPEND the override's items to the
+# base file's, not replace them — without it, this stack would try to
+# bind 80 and 443 *in addition to* 18080, and still fail to start on any
+# host where something else already owns 80/443.
 services:
   nginx:
-    ports:
+    ports: !override
       - "127.0.0.1:18080:80"
