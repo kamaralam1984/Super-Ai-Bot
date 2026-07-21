@@ -26,6 +26,13 @@ logs/*.log
 /plugins/
 /connectors/
 /config/
+
+# vectorStore.ts's default storage dir is process.cwd()-relative (not
+# APP_ROOT-relative like every other RUNTIME_DIRECTORIES entry above), so
+# in practice it lands under backend/ (backend/'s own cwd in both `tsx
+# watch` dev and the Docker image's WORKDIR) rather than at the repo
+# root — anchoring /storage/ above doesn't catch this one.
+backend/storage/
 *.tsbuildinfo
 .DS_Store
 coverage/
