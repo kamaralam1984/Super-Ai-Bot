@@ -1,0 +1,66 @@
+# HTTPS server block — active once deploy/scripts/ssl-init.sh has
+# obtained a real Let's Encrypt certificate for ${DOMAIN}. Installed as
+# conf.d/kvl.conf in place of http-only.conf.template at that point; a
+# renewed cert (deploy/docker-compose.yml's `certbot` service) reuses the
+# same file paths, so renewal never requires touching this file again.
+
+upstream kvl_backend {
+    server backend:4500 max_fails=3 fail_timeout=30s;
+    keepalive 32;
+}
+
+upstream kvl_frontend {
+    server frontend:8080 max_fails=3 fail_timeout=30s;
+    keepalive 16;
+}
+
+# Plain HTTP: ACME renewal still needs the challenge path reachable over
+# HTTP (Let's Encrypt's HTTP-01 validator does not follow a redirect to
+# HTTPS for the challenge URL itself), everything else redirects.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${DOMAIN};
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        try_files $uri =404;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name ${DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+
+    # TLS best practices (Mozilla "Intermediate" compatibility profile) —
+    # TLS 1.2+ only, no legacy cipher suites, session resumption enabled
+    # so repeat visitors (and the chat widget's frequent API calls) don't
+    # pay a full handshake every time.
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    # OCSP stapling — the server, not every client, checks revocation
+    # status, saving a round trip per visitor.
+    ssl_stapling on;
+    ssl_stapling_verify on;
+    ssl_trusted_certificate /etc/letsencrypt/live/${DOMAIN}/chain.pem;
+    resolver 1.1.1.1 8.8.8.8 valid=300s;
+    resolver_timeout 5s;
+
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+
+    include /etc/nginx/conf.d/kvl-locations.conf;
+}

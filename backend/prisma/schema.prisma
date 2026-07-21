@@ -1,0 +1,1425 @@
+// KVL Super AI Chatbot — Installer database schema.
+// Phase 1 scope: the installer's own bookkeeping (installation records, a
+// one-way audit trail of generated secrets, and structured install logs).
+// The product's application-domain tables (conversations, connectors, etc.)
+// are out of scope for the installer and land in a later phase.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider          = "postgresql"
+  url               = env("DATABASE_URL")
+  // Only used by `prisma migrate dev` (developer workflow, to diff against a
+  // scratch DB) and requires CREATEDB privilege — set to an admin connection.
+  // Customer installs only ever run `migrate deploy`, which never touches this.
+  shadowDatabaseUrl = env("SHADOW_DATABASE_URL")
+}
+
+enum InstallationStatus {
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+  ROLLED_BACK
+}
+
+enum LogStatus {
+  INFO
+  SUCCESS
+  WARN
+  ERROR
+}
+
+model Installation {
+  id             String             @id @default(cuid())
+  applicationId  String             @unique
+  installationId String             @unique
+  websiteName    String
+  websiteUrl     String
+  status         InstallationStatus @default(IN_PROGRESS)
+  startedAt      DateTime           @default(now())
+  completedAt    DateTime?
+
+  secretFingerprints   SecretFingerprint[]
+  logs                 InstallationLog[]
+  crawlJobs            CrawlJob[]
+  connectors           Connector[]
+  permissionGrants     PermissionGrant[]
+  permissionEvents     PermissionEvent[]
+  visitors             Visitor[]
+  conversations        Conversation[]
+  escalationTickets    EscalationTicket[]
+  notifications        Notification[]
+  notificationSettings NotificationSettings?
+  backgroundJobs       BackgroundJob[]
+  scanSchedules        ScanSchedule[]
+  backupRecords        BackupRecord[]
+  plugins              Plugin[]
+  license              License?
+
+  @@index([status])
+  @@map("installations")
+}
+
+// One-way SHA-256 fingerprints of generated secrets — never the raw value.
+// Lets an operator verify "was this .env tampered with after install"
+// without the database ever being able to leak a working secret.
+model SecretFingerprint {
+  id              String       @id @default(cuid())
+  installationId  String
+  installation    Installation @relation(fields: [installationId], references: [id], onDelete: Cascade)
+  secretName      String
+  fingerprintHash String
+  createdAt       DateTime     @default(now())
+
+  @@unique([installationId, secretName])
+  @@map("secret_fingerprints")
+}
+
+model InstallationLog {
+  id             String       @id @default(cuid())
+  installationId String
+  installation   Installation @relation(fields: [installationId], references: [id], onDelete: Cascade)
+  time           DateTime
+  status         LogStatus
+  component      String
+  message        String
+  durationMs     Int?
+  error          String?
+  createdAt      DateTime     @default(now())
+
+  @@index([installationId, time])
+  @@map("installation_logs")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Phase 2 — Website Auto Scanner. Builds the AI knowledge base for one
+// installation's website: discovers pages/documents, crawls them safely,
+// extracts structured content, deduplicates, and prepares chunks +
+// embeddings for retrieval. Embeddings are stored as a plain Float[] with
+// in-application cosine similarity (see docs/SCANNER.md) rather than
+// pgvector — the `vector` Postgres extension isn't available on every
+// target host, and this is a legitimate, real, working default at the
+// scale a single site's knowledge base sits at; pgvector is a documented
+// upgrade path, not a placeholder we're pretending is done.
+
+enum CrawlJobStatus {
+  QUEUED
+  DISCOVERING
+  CRAWLING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum PageCrawlStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  SKIPPED
+}
+
+enum DocumentType {
+  PDF
+  DOCX
+  DOC
+  XLSX
+  CSV
+  TXT
+  MARKDOWN
+  XML
+  JSON
+}
+
+model CrawlJob {
+  id               String         @id @default(cuid())
+  installationId   String
+  installation     Installation   @relation(fields: [installationId], references: [id], onDelete: Cascade)
+  websiteUrl       String
+  status           CrawlJobStatus @default(QUEUED)
+  config           Json // { maxDepth, maxPages, concurrency, respectRobotsTxt, ... }
+  techStack        Json? // detected CMS/framework signals
+  sitemapUrls      Json? // string[] — discovered sitemap.xml URLs, read back by monitor/detect/siteMetadataMonitor.ts to diff against the next crawl's list
+  robotsTxtContent String?        @db.Text // raw robots.txt body as fetched this crawl, same purpose as sitemapUrls above
+
+  totalPagesDiscovered Int @default(0)
+  totalPagesCrawled    Int @default(0)
+  totalPagesFailed     Int @default(0)
+
+  startedAt    DateTime  @default(now())
+  completedAt  DateTime?
+  errorMessage String?
+
+  pages            CrawledPage[]
+  documents        ProcessedDocument[]
+  chunks           KnowledgeChunk[]
+  report           CrawlReport?
+  techDetection    TechDetectionReport?
+  connectors       Connector[]
+  trainingReport   TrainingReport?
+  comparisonReport KnowledgeComparisonReport?
+
+  @@index([installationId])
+  @@index([status])
+  @@map("crawl_jobs")
+}
+
+model CrawledPage {
+  id         String   @id @default(cuid())
+  crawlJobId String
+  crawlJob   CrawlJob @relation(fields: [crawlJobId], references: [id], onDelete: Cascade)
+
+  url          String
+  canonicalUrl String?
+  depth        Int
+  statusCode   Int?
+  contentHash  String? // sha256 of cleaned text — drives change detection + dedup
+  pageType     String? // classified: home/about/product/blog/faq/contact/policy/other
+  crawlStatus  PageCrawlStatus @default(PENDING)
+  errorMessage String?
+
+  title           String?
+  metaTitle       String?
+  metaDescription String?
+  language        String?
+  isDuplicate     Boolean @default(false)
+  duplicateOfUrl  String?
+
+  headings       Json? // { h1: string[], h2: string[], ... }
+  paragraphs     Json? // string[]
+  lists          Json?
+  tables         Json?
+  breadcrumbs    Json?
+  contactInfo    Json? // { phones, emails, addresses, hours, mapsLinks, whatsapp, social }
+  images         Json? // { src, alt, caption }[]
+  videos         Json?
+  forms          Json?
+  ctaButtons     Json?
+  structuredData Json? // raw JSON-LD + OpenGraph + Twitter Card blocks found on the page
+  ocrResults     Json? // { imageUrl, text, confidence, language }[] — raw OCR output; Phase 3 chunks it, Phase 2 only extracts it (avoids re-fetching images later)
+
+  fetchedAt DateTime @default(now())
+
+  products ExtractedProduct[]
+  services ExtractedService[]
+  faqs     ExtractedFaq[]
+  chunks   KnowledgeChunk[]
+  contacts ExtractedContact[]
+  policies ExtractedPolicy[]
+
+  @@unique([crawlJobId, url])
+  @@index([crawlJobId])
+  @@index([contentHash])
+  @@map("crawled_pages")
+}
+
+model ExtractedProduct {
+  id     String      @id @default(cuid())
+  pageId String
+  page   CrawledPage @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  name           String
+  category       String?
+  price          String?
+  currency       String?
+  discount       String?
+  description    String?
+  specifications Json?
+  features       Json?
+  images         Json?
+  sku            String?
+  brand          String?
+  stockStatus    String?
+  rating         Float?
+  reviewCount    Int?
+  source         String  @default("structured_data") // structured_data | heuristic
+
+  // Phase 6 — Product Learning Engine enrichment (see docs/AI_TRAINING_ENGINE.md)
+  benefits        Json? // string[] — distinct from `features`: outcomes/value, not specs
+  availability    String? // normalized from stockStatus + description signals: "in_stock" | "out_of_stock" | "preorder" | "unknown"
+  relatedProducts Json? // { productId, name, score, reason }[] — computed by productLearning.ts
+
+  @@index([pageId])
+  @@map("extracted_products")
+}
+
+model ExtractedService {
+  id     String      @id @default(cuid())
+  pageId String
+  page   CrawledPage @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  name        String
+  description String?
+  pricing     String?
+  benefits    Json?
+  features    Json?
+  workflow    Json?
+  industries  Json?
+  source      String  @default("heuristic")
+
+  // Phase 6 — Service Learning Engine enrichment
+  relatedServices Json? // { serviceId, name, score, reason }[]
+  dependencies    Json? // string[] — prerequisites/other services this one depends on, extracted from description/workflow text
+
+  @@index([pageId])
+  @@map("extracted_services")
+}
+
+model ExtractedFaq {
+  id     String      @id @default(cuid())
+  pageId String
+  page   CrawledPage @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  question String
+  answer   String
+  category String?
+  priority Int     @default(0)
+  source   String  @default("heuristic")
+
+  isDuplicate      Boolean @default(false)
+  duplicateOfFaqId String?
+
+  // Phase 6 — FAQ Learning + auto-merge engine
+  confidence       Float? // per-FAQ confidence, distinct from the downstream KnowledgeChunk score
+  similarQuestions Json? // { faqId, question, score }[] — near-duplicate paraphrase cluster members (not merged)
+  relatedQuestions Json? // { faqId, question, score }[] — topically related but distinct questions
+  mergedFaqIds     Json? // string[] — IDs of duplicate FAQs consolidated into this one (only set on the canonical FAQ)
+
+  @@index([pageId])
+  @@map("extracted_faqs")
+}
+
+enum ContactType {
+  GENERAL
+  SUPPORT
+  SALES
+}
+
+// Phase 6 — Contact Learning Engine: normalizes CrawledPage.contactInfo's
+// untyped Json blob into structured, queryable rows. A page can yield
+// multiple ExtractedContact rows (e.g. separate support and sales contacts).
+model ExtractedContact {
+  id     String      @id @default(cuid())
+  pageId String
+  page   CrawledPage @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  contactType ContactType @default(GENERAL)
+  branch      String?
+  department  String?
+  phones      Json? // string[]
+  emails      Json? // string[]
+  addresses   Json? // string[]
+  mapsLinks   Json? // string[]
+  hours       Json? // string[] — raw business-hours lines, kept as-extracted (no timezone-normalization guessing)
+  source      String      @default("heuristic")
+
+  @@index([pageId])
+  @@map("extracted_contacts")
+}
+
+enum PolicyType {
+  PRIVACY
+  REFUND
+  SHIPPING
+  CANCELLATION
+  WARRANTY
+  TERMS
+  COOKIES
+  OTHER
+}
+
+// Phase 6 — Policy Learning Engine: classifies a "Policies"-categorized
+// page/chunk into its specific sub-type, distinct from generic chunk-level
+// "Policies" categorization (which Phase 3 already does).
+model ExtractedPolicy {
+  id     String      @id @default(cuid())
+  pageId String
+  page   CrawledPage @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  policyType      PolicyType
+  title           String?
+  content         String     @db.Text
+  confidenceScore Float
+  source          String     @default("heuristic")
+
+  @@index([pageId])
+  @@map("extracted_policies")
+}
+
+enum RelationshipType {
+  PRODUCT_CATEGORY
+  SERVICE_INDUSTRY
+  FAQ_PRODUCT
+  FAQ_SERVICE
+  POLICY_SERVICE
+  BLOG_PRODUCT
+  COMPANY_CONTACT
+  PRODUCT_PRODUCT
+  SERVICE_SERVICE
+}
+
+// Phase 6 — Knowledge Relationship Engine: the semantic knowledge graph.
+// Deliberately polymorphic (sourceType/targetType + plain id strings)
+// rather than per-entity-type foreign keys, since a single relationship
+// table needs to connect six structurally different entity kinds
+// (KnowledgeChunk, ExtractedProduct, ExtractedService, ExtractedFaq,
+// ExtractedContact, ExtractedPolicy, and bare category-name strings) —
+// Prisma has no native polymorphic-relation support, and one FK column per
+// possible target type would mean five/six nullable FK columns per row for
+// no real benefit, since edges are read by (sourceType, sourceId) lookup,
+// not via Prisma's relation-traversal API. `installationId` is a plain
+// indexed field with no formal relation, mirroring `SearchQueryLog`'s
+// existing precedent for the same reason: relationships aren't scoped to
+// exactly one parent row that should cascade-delete them.
+model KnowledgeRelationship {
+  id               String           @id @default(cuid())
+  installationId   String
+  sourceType       String // "Product" | "Service" | "Faq" | "Policy" | "Contact" | "Chunk" | "Category"
+  sourceId         String
+  targetType       String
+  targetId         String
+  relationshipType RelationshipType
+  confidence       Float
+  evidence         Json // string[] — human-readable reasons, same evidence-list convention as Phase 4's ScoredCandidate
+  createdAt        DateTime         @default(now())
+
+  @@unique([sourceType, sourceId, targetType, targetId, relationshipType])
+  @@index([installationId])
+  @@index([sourceType, sourceId])
+  @@index([targetType, targetId])
+  @@map("knowledge_relationships")
+}
+
+// Phase 6 — one row per training run, the persisted analogue of
+// CrawlReport (Phase 2) and TechDetectionReport (Phase 4).
+model TrainingReport {
+  id          String   @id @default(cuid())
+  crawlJobId  String   @unique
+  crawlJob    CrawlJob @relation(fields: [crawlJobId], references: [id], onDelete: Cascade)
+  generatedAt DateTime @default(now())
+
+  incremental Boolean @default(false)
+
+  totalDocuments       Int
+  totalPages           Int
+  productsLearned      Int
+  servicesLearned      Int
+  faqsLearned          Int
+  policiesLearned      Int
+  contactsLearned      Int
+  embeddingsGenerated  Int
+  relationshipsCreated Int
+  trainingTimeMs       Int
+
+  categoryBreakdown Json // { [category: string]: number }
+  overallConfidence Float
+  errors            Json // string[]
+  warnings          Json // string[]
+
+  @@map("training_reports")
+}
+
+model ProcessedDocument {
+  id         String   @id @default(cuid())
+  crawlJobId String
+  crawlJob   CrawlJob @relation(fields: [crawlJobId], references: [id], onDelete: Cascade)
+
+  sourceUrl     String
+  documentType  DocumentType
+  extractedText String?      @db.Text
+  contentHash   String?
+  pageCount     Int?
+  isDuplicate   Boolean      @default(false)
+  errorMessage  String?
+  docMetadata   Json? // { title?, author?, creator?, ... } — real document properties, format-dependent
+  headings      Json? // string[] — from DOCX paragraph styles / Markdown # syntax
+  hyperlinks    Json? // { text, url }[]
+  tables        Json? // string[][][] — one entry per table found
+  fetchedAt     DateTime     @default(now())
+
+  chunks KnowledgeChunk[]
+
+  @@unique([crawlJobId, sourceUrl])
+  @@index([crawlJobId])
+  @@index([contentHash])
+  @@map("processed_documents")
+}
+
+enum ChunkType {
+  PARAGRAPH
+  TABLE
+  CODE
+  HEADING_SECTION
+  LIST
+}
+
+model KnowledgeChunk {
+  id         String             @id @default(cuid())
+  crawlJobId String
+  crawlJob   CrawlJob           @relation(fields: [crawlJobId], references: [id], onDelete: Cascade)
+  pageId     String?
+  page       CrawledPage?       @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  documentId String?
+  document   ProcessedDocument? @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  content          String    @db.Text
+  chunkType        ChunkType @default(PARAGRAPH)
+  title            String?
+  section          String?
+  category         String?
+  language         String?
+  sourceUrl        String
+  confidenceScore  Float     @default(1.0)
+  embedding        Float[]
+  embeddingModel   String    @default("Xenova/all-MiniLM-L6-v2")
+  embeddingVersion Int       @default(1)
+  metadata         Json?
+
+  isDuplicate        Boolean          @default(false)
+  duplicateOfChunkId String?
+  duplicateOf        KnowledgeChunk?  @relation("ChunkDuplicates", fields: [duplicateOfChunkId], references: [id], onDelete: SetNull)
+  duplicates         KnowledgeChunk[] @relation("ChunkDuplicates")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  versions ChunkVersion[]
+
+  @@index([crawlJobId])
+  @@index([pageId])
+  @@index([documentId])
+  @@index([category])
+  @@index([isDuplicate])
+  @@map("knowledge_chunks")
+}
+
+// Historical snapshots of a chunk's content/embedding — Phase 3's
+// "Versioning System": every time a chunk's content changes (a recrawl
+// finds the source page modified), the previous state is archived here
+// before the live KnowledgeChunk row is updated, enabling rollback.
+model ChunkVersion {
+  id              String         @id @default(cuid())
+  chunkId         String
+  chunk           KnowledgeChunk @relation(fields: [chunkId], references: [id], onDelete: Cascade)
+  version         Int
+  content         String         @db.Text
+  embedding       Float[]
+  confidenceScore Float
+  changeReason    String?
+  createdAt       DateTime       @default(now())
+
+  @@unique([chunkId, version])
+  @@index([chunkId])
+  @@map("chunk_versions")
+}
+
+// Bookkeeping for the on-disk HNSW ANN index (backend/src/knowledge/vectorStore.ts)
+// — one row per namespace (one namespace per installation's knowledge base).
+model VectorIndexMeta {
+  id             String   @id @default(cuid())
+  namespace      String   @unique
+  vectorCount    Int      @default(0)
+  dimensions     Int
+  indexFilePath  String
+  embeddingModel String
+  lastRebuiltAt  DateTime @default(now())
+  createdAt      DateTime @default(now())
+
+  @@map("vector_index_meta")
+}
+
+// Audit trail for the Semantic Search Engine — required by the spec's
+// "Audit Logged" security requirement and independently useful for
+// understanding what customers' end users actually ask.
+model SearchQueryLog {
+  id             String   @id @default(cuid())
+  installationId String
+  queryText      String
+  queryLanguage  String?
+  searchMode     String
+  resultCount    Int
+  topChunkIds    Json
+  tookMs         Int
+  createdAt      DateTime @default(now())
+
+  @@index([installationId, createdAt])
+  @@map("search_query_logs")
+}
+
+model CrawlReport {
+  id          String   @id @default(cuid())
+  crawlJobId  String   @unique
+  crawlJob    CrawlJob @relation(fields: [crawlJobId], references: [id], onDelete: Cascade)
+  generatedAt DateTime @default(now())
+
+  techStack            Json
+  totalPages           Int
+  scannedPages         Int
+  failedPages          Int
+  productsFound        Int
+  servicesFound        Int
+  blogsFound           Int
+  documentsFound       Int
+  imagesFound          Int
+  faqsFound            Int
+  formsFound           Int
+  languages            Json
+  seoSummary           Json
+  performanceSummary   Json
+  errors               Json
+  warnings             Json
+  securityObservations Json
+
+  @@map("crawl_reports")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Phase 4 — Enterprise Smart Technology Detection Engine. Runs after Phase 2
+// as a separate, re-runnable analysis stage (same relationship Phase 3 has
+// to Phase 2): reads the already-crawled homepage/pages plus fresh,
+// read-only signal probes (headers, robots.txt, well-known paths, TLS,
+// DNS) and identifies the site's technology stack across 16 categories.
+// Every category is stored as a Json array of `{ name, confidence,
+// evidence }` candidates (best match first) rather than a single guessed
+// string — this is what the spec's "never rely on only one signal, build a
+// confidence score" requirement means at the schema level. See
+// docs/TECH_DETECTION.md for the full pipeline and confidence-scoring
+// design.
+
+model TechDetectionReport {
+  id          String   @id @default(cuid())
+  crawlJobId  String   @unique
+  crawlJob    CrawlJob @relation(fields: [crawlJobId], references: [id], onDelete: Cascade)
+  generatedAt DateTime @default(now())
+
+  websiteUrl String
+
+  cms                  Json // DetectionCandidate[] — WordPress, Shopify, Magento, ...
+  frontendFrameworks   Json // DetectionCandidate[] — Next.js, React, Vue, ...
+  backendFrameworks    Json // DetectionCandidate[] — Laravel, Django, Express, ...
+  programmingLanguages Json // DetectionCandidate[] — PHP, Python, Go, ...
+  hosting              Json // DetectionCandidate[] — Cloudflare, AWS, Vercel, ...
+  server               Json // DetectionCandidate[] — Nginx, Apache, LiteSpeed, ...
+  cdn                  Json // DetectionCandidate[] — Cloudflare, CloudFront, Fastly, ...
+  database             Json // DetectionCandidate[] — inferred only, never probed directly
+  jsLibraries          Json // DetectionCandidate[] — jQuery, GSAP, Three.js, ...
+  cssFrameworks        Json // DetectionCandidate[] — Bootstrap, Tailwind, MUI, ...
+  seoTools             Json // DetectionCandidate[] — Yoast, Rank Math, schema.org, ...
+  analytics            Json // DetectionCandidate[] — GA4, GTM, Meta Pixel, ...
+  paymentGateways      Json // DetectionCandidate[] — Stripe, Razorpay, PayPal, ...
+  authentication       Json // DetectionCandidate[] — Google/FB/Apple login, JWT, OAuth, ...
+  liveChat             Json // DetectionCandidate[] — Tawk.to, Intercom, Crisp, ...
+  forms                Json // DetectionCandidate[] — contact, newsletter, checkout, ...
+
+  securityFindings    Json // SecurityFinding[] (HTTPS, HSTS, CSP, CORS, cookie flags, ...)
+  securityScore       Float // 0-100
+  performanceFindings Json // PerformanceFinding[] (lazy-load, compression, caching, ...)
+  performanceScore    Float // 0-100
+
+  overallConfidence           Float // 0-1, mean of every category's top-candidate confidence
+  recommendations             Json // string[]
+  smartConnectorCompatibility Json // { compatible: boolean, recommendedConnectors: string[], notes: string[] }
+
+  @@map("tech_detection_reports")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Phase 5 — KVL Smart Connector Engine. Consumes Phase 4's TechnologyReport
+// to recommend, configure, and continuously validate a read-only connection
+// to the customer's own website/CMS/enterprise system, then exposes a
+// permission-checked set of AI tools (getProducts, getServices, ...) over
+// that connection. See docs/SMART_CONNECTOR.md for the full pipeline,
+// security posture (least-privilege, encrypted credentials, GET/HEAD-only
+// REST + mutation-free GraphQL enforcement), and real-world testing
+// findings.
+
+enum ConnectorType {
+  WORDPRESS
+  WOOCOMMERCE
+  SHOPIFY
+  MAGENTO
+  OPENCART
+  PRESTASHOP
+  LARAVEL
+  GENERIC_REST
+  GENERIC_GRAPHQL
+  UNIVERSAL_REST
+  WEBHOOK
+  // Phase 9 — see docs/CONNECTOR_EXTENSIONS.md
+  SOAP_API
+  GRPC_API
+  XML_API
+}
+
+enum ConnectorAuthMethod {
+  API_KEY
+  BEARER_TOKEN
+  JWT
+  OAUTH2
+  BASIC_AUTH
+  SESSION
+  CUSTOM_HEADER
+  SIGNED_REQUEST
+  NONE
+  // Phase 9 additions — HMAC is deliberately not a separate value; see
+  // connector/types.ts's ConnectorAuthMethod doc comment.
+  OIDC
+  MTLS
+}
+
+enum ConnectorStatus {
+  PENDING
+  CONNECTED
+  DEGRADED
+  DISCONNECTED
+  ERROR
+}
+
+enum ConnectorEventType {
+  CREATED
+  UPDATED
+  AUTHENTICATED
+  API_CALL
+  ERROR
+  RETRY
+  HEALTH_CHECK
+  DISCONNECTED
+  RECOVERED
+}
+
+// One configured connection to a customer's website/CMS/enterprise system.
+// Always read-only — see connector/client/readOnlyHttpClient.ts for the
+// enforcement layer that makes this a guarantee, not just a convention.
+model Connector {
+  id             String       @id @default(cuid())
+  installationId String
+  installation   Installation @relation(fields: [installationId], references: [id], onDelete: Cascade)
+  crawlJobId     String?
+  crawlJob       CrawlJob?    @relation(fields: [crawlJobId], references: [id], onDelete: SetNull)
+
+  name          String
+  connectorType ConnectorType
+  authMethod    ConnectorAuthMethod
+  baseUrl       String
+  status        ConnectorStatus     @default(PENDING)
+  // Phase 9 — lower value = tried first when more than one connector for
+  // this installation can serve the same EndpointCategory (e.g. two
+  // Products-capable connectors); see connector/manage/connectionManager.ts.
+  // Ties broken by createdAt (older connector wins), matching "explicit
+  // config beats implicit ordering, but implicit ordering is still
+  // deterministic" — never a random pick between equally-configured connectors.
+  priority      Int                 @default(0)
+
+  config Json // { timeoutMs, retryPolicy, rateLimit, circuitBreaker, soap?, grpc?, ... }
+
+  healthScore       Float?
+  securityScore     Float?
+  lastHealthCheckAt DateTime?
+  lastErrorMessage  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  credential       ConnectorCredential?
+  endpoints        ConnectorEndpoint[]
+  healthChecks     ConnectorHealthCheck[]
+  events           ConnectorEvent[]
+  permissionGrants PermissionGrant[]
+
+  @@index([installationId])
+  @@index([status])
+  @@map("connectors")
+}
+
+// Encrypted credential storage — the ciphertext (AES-256-GCM, see
+// knowledge/security/encryption.ts) is the only place a secret's bytes ever
+// live; `fingerprint` is a one-way SHA-256 hash for audit, mirroring
+// SecretFingerprint's pattern from Phase 1. Never store secrets in plain
+// text, per the spec's explicit requirement.
+model ConnectorCredential {
+  id               String              @id @default(cuid())
+  connectorId      String              @unique
+  connector        Connector           @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+  authMethod       ConnectorAuthMethod
+  encryptedPayload String              @db.Text
+  fingerprint      String
+  createdAt        DateTime            @default(now())
+  rotatedAt        DateTime?
+
+  @@map("connector_credentials")
+}
+
+// One discovered, read-only API endpoint. `category` matches the AI tool
+// layer's vocabulary (products/orders/services/users/appointments/
+// inventory/categories/search) so a tool call can look up its backing
+// endpoint directly.
+model ConnectorEndpoint {
+  id          String    @id @default(cuid())
+  connectorId String
+  connector   Connector @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+
+  category        String // "products" | "orders" | "services" | "users" | "appointments" | "inventory" | "categories" | "search" | "custom"
+  path            String
+  method          String    @default("GET")
+  discoveredVia   String // "known-pattern" | "openapi" | "graphql-introspection" | "manual"
+  responseSample  Json?
+  validated       Boolean   @default(false)
+  lastValidatedAt DateTime?
+  latencyMs       Int?
+  errorMessage    String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([connectorId, path])
+  @@index([connectorId])
+  @@map("connector_endpoints")
+}
+
+model ConnectorHealthCheck {
+  id          String    @id @default(cuid())
+  connectorId String
+  connector   Connector @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+
+  checkedAt    DateTime        @default(now())
+  status       ConnectorStatus
+  latencyMs    Int?
+  errorMessage String?
+  availability Float // 0-1
+
+  @@index([connectorId, checkedAt])
+  @@map("connector_health_checks")
+}
+
+// Durable event/audit history for a connector's lifecycle — complements the
+// file-based structured logger (knowledge/security/auditLog.ts) with a
+// queryable per-connector timeline, matching SearchQueryLog's precedent of
+// "important structured history gets a real table."
+model ConnectorEvent {
+  id          String    @id @default(cuid())
+  connectorId String
+  connector   Connector @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+
+  eventType ConnectorEventType
+  message   String
+  metadata  Json?
+  createdAt DateTime           @default(now())
+
+  @@index([connectorId, createdAt])
+  @@map("connector_events")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Phase 7 — Enterprise Permission & Connector Access Engine. Closes the one
+// real gap Phase 5/6 left open: nothing previously stopped an internal
+// consumer (the AI Training Engine, the AI tool layer) from reading every
+// row a Prisma query could reach. This phase does not re-implement OAuth2,
+// credential storage, health monitoring, or platform connectors — Phase 5
+// already owns all of that (connector/auth/authManager.ts, connector/vault/
+// credentialVault.ts, connector/health/healthMonitor.ts, connector/registry/
+// connectorRegistry.ts) and is reused as-is. What's new here is
+// authorization: an explicit, administrator-controlled, least-privilege
+// grant per business data category, enforced at the one seam every data
+// read already passes through (a Record service), not scattered ad hoc
+// checks. See docs/PERMISSION_ENGINE.md for the full design, including why
+// general crawled website content (pages/company-info/generic chunks) is
+// treated as a Phase 1/2 authorization boundary the customer already
+// crossed by installing the product, while these 12 categories — the ones
+// explicitly named in the product spec, spanning both Phase 6's crawled
+// knowledge base and Phase 5's live connectors — get their own
+// administrator-controlled toggle.
+
+enum DataScope {
+  PRODUCTS
+  SERVICES
+  FAQS
+  ORDERS
+  CUSTOMERS
+  INVENTORY
+  APPOINTMENTS
+  CATEGORIES
+  PRICING
+  SHIPPING
+  BLOGS
+  SUPPORT_ARTICLES
+}
+
+// A single-value enum, not a boolean flag — this is what "the system must
+// never request DELETE/UPDATE/INSERT/DROP/EXECUTE ADMIN OPERATIONS"
+// (see docs/PERMISSION_ENGINE.md) means enforced at the type level: there
+// is no write-access value this column could ever legally hold, so no
+// future caller can accidentally grant one by passing the wrong string.
+enum PermissionAccessLevel {
+  READ_ONLY
+}
+
+enum PermissionGrantStatus {
+  ACTIVE
+  REVOKED
+}
+
+enum PermissionEventType {
+  WIZARD_COMPLETED
+  GRANTED
+  REVOKED
+  ACCESS_CHECKED
+  ACCESS_DENIED
+}
+
+// One administrator-authorized data category, optionally scoped to a
+// specific Phase 5 Connector (connectorId set) or to the installation's own
+// crawled knowledge base (connectorId null). There is deliberately no
+// `@@unique` constraint on (installationId, connectorId, dataScope):
+// Postgres treats every NULL as distinct for uniqueness purposes, so a
+// unique index would only ever catch duplicate connector-scoped grants, not
+// duplicate site-scoped ones (connectorId null) — the actual common case.
+// permissionRecord.service.ts enforces "at most one ACTIVE grant per
+// (installationId, connectorId, dataScope)" itself (revoke-then-create),
+// which also preserves full grant/revoke history instead of a blind
+// upsert overwriting it.
+model PermissionGrant {
+  id             String                @id @default(cuid())
+  installationId String
+  installation   Installation          @relation(fields: [installationId], references: [id], onDelete: Cascade)
+  connectorId    String?
+  connector      Connector?            @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+  dataScope      DataScope
+  accessLevel    PermissionAccessLevel @default(READ_ONLY)
+  status         PermissionGrantStatus @default(ACTIVE)
+  grantedAt      DateTime              @default(now())
+  grantedBy      String
+  revokedAt      DateTime?
+  revokedBy      String?
+  notes          String?
+
+  @@index([installationId, status])
+  @@index([connectorId])
+  @@map("permission_grants")
+}
+
+// Durable audit history for the Permission Engine — same "important
+// structured history gets a real table" precedent as ConnectorEvent and
+// SearchQueryLog, complementing the file-based structured logger
+// (knowledge/security/auditLog.ts) with a queryable per-installation
+// timeline for the admin UI.
+model PermissionEvent {
+  id             String              @id @default(cuid())
+  installationId String
+  installation   Installation        @relation(fields: [installationId], references: [id], onDelete: Cascade)
+  connectorId    String?
+  dataScope      DataScope?
+  eventType      PermissionEventType
+  message        String
+  metadata       Json?
+  createdAt      DateTime            @default(now())
+
+  @@index([installationId, createdAt])
+  @@map("permission_events")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Phase 8 — Enterprise AI Live Chat Engine. The conversational layer that
+// actually talks to website visitors, grounded in Phase 3's knowledge base
+// (via performKnowledgeSearch) and Phase 5's connectors (via Phase 7's
+// authorizedAiToolLayer) — see docs/CHAT_ENGINE.md for the full RAG
+// pipeline. `Message.encryptedContent` follows Phase 5's
+// `ConnectorCredential` precedent: AES-256-GCM ciphertext at rest via
+// knowledge/security/encryption.ts, decrypted only in-process by
+// chatRecord.service.ts, never stored in plaintext.
+
+enum ConversationStatus {
+  ACTIVE
+  IDLE
+  ESCALATED
+  CLOSED
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+enum MessageFeedback {
+  NONE
+  LIKE
+  DISLIKE
+}
+
+enum EscalationReason {
+  HUMAN_REQUESTED
+  LOW_CONFIDENCE
+  SENSITIVE_TOPIC
+  REPEATED_FAILURE
+  COMPLAINT
+  LEGAL
+  BILLING_DISPUTE
+  TECHNICAL_BEYOND_KNOWLEDGE
+}
+
+enum EscalationChannel {
+  LIVE_AGENT
+  EMAIL
+  TICKET
+  CALLBACK
+}
+
+enum EscalationStatus {
+  OPEN
+  ACKNOWLEDGED
+  RESOLVED
+  CANCELLED
+}
+
+// One browser/device across possibly many conversations over time — an
+// anonymous, product-issued id (a random token in a first-party cookie),
+// not a real identity. `fingerprint` is that public id, not a security
+// secret (unlike SecretFingerprint/ConnectorCredential.fingerprint, which
+// are one-way hashes of real secrets) — it's what lets a returning visitor
+// be recognized and their prior conversations resumed.
+model Visitor {
+  id                String       @id @default(cuid())
+  installationId    String
+  installation      Installation @relation(fields: [installationId], references: [id], onDelete: Cascade)
+  fingerprint       String
+  firstSeenAt       DateTime     @default(now())
+  lastSeenAt        DateTime     @default(now())
+  preferredLanguage String?
+  metadata          Json?
+
+  conversations Conversation[]
+
+  @@unique([installationId, fingerprint])
+  @@map("visitors")
+}
+
+// The durable conversation thread — survives reconnects/page reloads (the
+// visitor's cookie + this row's id is all "session recovery" needs) and
+// can span multiple Socket.IO connections over its lifetime. One
+// long-term-memory field (`topicSummary`) rather than a separate table:
+// it's a single rolling summary the context manager rewrites each turn,
+// not a history that needs its own rows — the full history is `messages`.
+model Conversation {
+  id             String       @id @default(cuid())
+  installationId String
+  installation   Installation @relation(fields: [installationId], references: [id], onDelete: Cascade)
+  visitorId      String
+  visitor        Visitor      @relation(fields: [visitorId], references: [id], onDelete: Cascade)
+
+  status       ConversationStatus @default(ACTIVE)
+  language     String?
+  topicSummary String?            @db.Text // long-term memory — see chat/memory/longTermMemory.ts
+
+  shareToken          String?   @unique
+  shareTokenExpiresAt DateTime?
+
+  startedAt     DateTime  @default(now())
+  lastMessageAt DateTime  @default(now())
+  closedAt      DateTime?
+
+  messages          Message[]
+  escalationTickets EscalationTicket[]
+
+  @@index([installationId, status])
+  @@index([visitorId])
+  @@map("conversations")
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  role             MessageRole
+  encryptedContent String      @db.Text
+
+  intent     String?
+  entities   Json?
+  language   String?
+  sources    Json? // CitationSource[] — see chat/citation/citationFormatter.ts
+  confidence Float?
+  tookMs     Int?
+  tokensIn   Int?
+  tokensOut  Int?
+
+  feedback MessageFeedback @default(NONE)
+
+  regeneratedFromId String?
+  regeneratedFrom   Message?  @relation("MessageRegeneration", fields: [regeneratedFromId], references: [id], onDelete: SetNull)
+  regenerations     Message[] @relation("MessageRegeneration")
+
+  createdAt DateTime @default(now())
+
+  @@index([conversationId, createdAt])
+  @@map("messages")
+}
+
+// A durable escalation record — complements the structured file audit log
+// (knowledge/security/auditLog.ts, extended with chat_escalation_* event
+// types) with a queryable, actionable "needs a human" queue, matching
+// ConnectorEvent/PermissionEvent's precedent of "important structured
+// history gets a real table."
+model EscalationTicket {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  installationId String
+  installation   Installation @relation(fields: [installationId], references: [id], onDelete: Cascade)
+
+  reason      EscalationReason
+  channel     EscalationChannel
+  status      EscalationStatus  @default(OPEN)
+  triggeredBy String // "system" | "visitor" | "admin"
+  notes       String?           @db.Text
+
+  createdAt  DateTime  @default(now())
+  resolvedAt DateTime?
+
+  @@index([installationId, status])
+  @@index([conversationId])
+  @@map("escalation_tickets")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Phase 10 — Enterprise Automatic Website Update Engine. Extends, rather
+// than duplicates, Phase 2/3/6's already-built page-level change detection
+// (scanner/recrawl/changeDetector.ts), knowledge-update planning
+// (knowledge/update/autoUpdateEngine.ts), chunk versioning/rollback
+// (knowledge/version/versionManager.ts + ChunkVersion), and in-process
+// retrain scheduling (training/retrain/retrainScheduler.ts). What's new
+// here: entity-level change detection (a specific product's price
+// changed, not just "the page's content hash changed"), a persisted
+// old-vs-new comparison report, durable cron-based scan schedules,
+// dashboard/email/webhook notifications, and a generic in-process
+// priority job queue. See docs/AUTO_UPDATE_ENGINE.md.
+
+enum NotificationType {
+  WEBSITE_UPDATED
+  TRAINING_COMPLETED
+  KNOWLEDGE_UPDATED
+  ERROR_OCCURRED
+  CONNECTION_FAILED
+  NEW_PRODUCTS_FOUND
+  NEW_SERVICES_FOUND
+  API_CHANGED
+  TECHNOLOGY_CHANGED
+  JOB_FAILED
+  ROLLBACK_PERFORMED
+}
+
+enum NotificationSeverity {
+  INFO
+  WARNING
+  ERROR
+  SUCCESS
+}
+
+enum NotificationChannelType {
+  DASHBOARD
+  EMAIL
+  WEBHOOK
+  LOG
+}
+
+enum NotificationDeliveryStatus {
+  PENDING
+  SENT
+  FAILED
+  SKIPPED
+}
+
+// One event worth telling an administrator about. Always persisted (the
+// "Dashboard" channel is simply this table, read back), regardless of
+// which other channels are also configured — see `deliveries` for the
+// per-channel delivery outcome (an email send failing never loses the
+// underlying notification itself).
+model Notification {
+  id             String               @id @default(cuid())
+  installationId String
+  installation   Installation         @relation(fields: [installationId], references: [id], onDelete: Cascade)
+  type           NotificationType
+  severity       NotificationSeverity @default(INFO)
+  title          String
+  message        String               @db.Text
+  metadata       Json?
+  readAt         DateTime?
+  createdAt      DateTime             @default(now())
+
+  deliveries NotificationDelivery[]
+
+  @@index([installationId, createdAt])
+  @@index([installationId, readAt])
+  @@map("notifications")
+}
+
+model NotificationDelivery {
+  id             String                     @id @default(cuid())
+  notificationId String
+  notification   Notification               @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+  channel        NotificationChannelType
+  status         NotificationDeliveryStatus @default(PENDING)
+  attemptedAt    DateTime                   @default(now())
+  errorMessage   String?
+
+  @@index([notificationId])
+  @@map("notification_deliveries")
+}
+
+// Per-installation channel configuration. SMTP server credentials
+// themselves (host/port/user/password) are deliberately *not* here —
+// they live in server-wide `.env` (`SMTP_*`), the same place every other
+// server-level (not customer-data) secret in this product lives, since a
+// self-hosted single-tenant install has exactly one outbound mail relay,
+// not one per installation. `emailAddress`/`webhookUrl` aren't secrets
+// (a recipient address, a callback URL) so plain-text storage here is
+// correct, not an oversight.
+model NotificationSettings {
+  id             String       @id @default(cuid())
+  installationId String       @unique
+  installation   Installation @relation(fields: [installationId], references: [id], onDelete: Cascade)
+
+  emailEnabled Boolean @default(false)
+  emailAddress String?
+
+  webhookEnabled Boolean @default(false)
+  webhookUrl     String?
+
+  /// Which NotificationType values should actually deliver to email/webhook (dashboard + log always receive everything — they're free, local, and the audit trail shouldn't have gaps). Empty array = all types enabled for that channel; see notify/notificationEngine.ts.
+  enabledEmailTypes   Json @default("[]")
+  enabledWebhookTypes Json @default("[]")
+
+  updatedAt DateTime @updatedAt
+
+  @@map("notification_settings")
+}
+
+enum JobType {
+  SCAN
+  TRAINING
+  NOTIFICATION_DELIVERY
+  ROLLBACK
+}
+
+enum JobStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  RETRYING
+  CANCELLED
+}
+
+// Durable record of a background job's lifecycle — the live, in-process
+// priority queue (jobs/jobQueue.ts) decides *execution order*; this table
+// is what makes "Failed Jobs" and job history visible/queryable after the
+// fact (and survives the process that ran it), matching every other
+// phase's "important structured history gets a real table" precedent.
+model BackgroundJob {
+  id             String       @id @default(cuid())
+  installationId String
+  installation   Installation @relation(fields: [installationId], references: [id], onDelete: Cascade)
+
+  type        JobType
+  priority    Int       @default(0)
+  status      JobStatus @default(PENDING)
+  payload     Json
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(3)
+  lastError   String?
+
+  scheduledFor DateTime  @default(now())
+  startedAt    DateTime?
+  completedAt  DateTime?
+  createdAt    DateTime  @default(now())
+
+  @@index([installationId, status])
+  @@index([status, scheduledFor])
+  @@map("background_jobs")
+}
+
+// A durable *schedule definition* — cron expression + which crawl job's
+// config to re-run. Execution is still in-process (this product's
+// documented single-long-running-process-per-installation model — see
+// retrain/retrainScheduler.ts's own doc comment), but the schedule itself
+// now survives a restart: the server re-registers every enabled
+// ScanSchedule with the in-process cron runner at startup, closing the
+// real gap where a scheduled retrain was previously forgotten on every
+// redeploy.
+model ScanSchedule {
+  id             String       @id @default(cuid())
+  installationId String
+  installation   Installation @relation(fields: [installationId], references: [id], onDelete: Cascade)
+  crawlJobId     String
+
+  cronExpression String
+  label          String?
+  enabled        Boolean   @default(true)
+  lastRunAt      DateTime?
+  nextRunAt      DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([installationId])
+  @@index([enabled, nextRunAt])
+  @@map("scan_schedules")
+}
+
+// One row per training run, comparing it against the previous completed
+// run for the same installation+website — the "detailed comparison
+// report" the spec asks for as a first-class, persisted artifact (not
+// just the ephemeral in-memory planning data `RecrawlPlan`/
+// `UpdateActionPlan` already produce during the run itself).
+model KnowledgeComparisonReport {
+  id                 String   @id @default(cuid())
+  crawlJobId         String   @unique
+  crawlJob           CrawlJob @relation(fields: [crawlJobId], references: [id], onDelete: Cascade)
+  previousCrawlJobId String?
+  generatedAt        DateTime @default(now())
+
+  pagesAdded     Int
+  pagesRemoved   Int
+  pagesUpdated   Int
+  pagesUnchanged Int
+
+  chunksAdded     Int
+  chunksRemoved   Int
+  chunksUpdated   Int
+  chunksDuplicate Int
+
+  /// EntityChangeSummary[] — see monitor/entityChangeDetector.ts. Field-level changes per business entity (a specific product's price/stock/description changed), grouped by category.
+  entityChanges     Json
+  /// { sitemapChanged, robotsTxtChanged, technologyChanged, ... } — see monitor/siteMetadataMonitor.ts.
+  metadataChanges   Json
+  /// { [category]: { added, removed, updated } }
+  categoryBreakdown Json
+
+  @@map("knowledge_comparison_reports")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Phase 11 — Enterprise Production Deployment System. Backup/Restore,
+// Plugin Management, and License Management each get a real, queryable
+// table — matching every prior phase's "important structured history
+// gets a real table, not just a log line" precedent (KnowledgeComparisonReport,
+// BackgroundJob, ...). Update Manager and Recovery deliberately have no
+// table here: they operate on the Docker host itself (deploy/scripts/
+// update.sh) and report status by reading the filesystem/Docker directly,
+// not by maintaining their own persisted history — see
+// docs/DEPLOYMENT.md's "Update Manager" section for why.
+
+enum BackupType {
+  MANUAL
+  SCHEDULED
+  PRE_UPDATE
+}
+
+enum BackupStatus {
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+}
+
+// One row per backup attempt (including failed ones — a gap in backup
+// history should be visible, not silently absent). `filePath` is relative
+// to the `backups/` runtime directory (backend/src/config/paths.ts),
+// never an absolute host path, since that directory's real location
+// differs between a Docker install (a named volume) and a bare-metal one.
+model BackupRecord {
+  id             String       @id @default(cuid())
+  installationId String
+  installation   Installation @relation(fields: [installationId], references: [id], onDelete: Cascade)
+
+  label          String?
+  type           BackupType
+  status         BackupStatus @default(IN_PROGRESS)
+  filePath       String
+  sizeBytes      BigInt?
+  checksumSha256 String?
+  /// string[] — which components this backup actually contains: database, redis, storage, knowledge, embeddings, config, uploads, plugins, connectors, logs. See backup/backupService.ts.
+  includes       Json
+  errorMessage   String?
+
+  createdAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  @@index([installationId, createdAt])
+  @@map("backup_records")
+}
+
+enum PluginStatus {
+  ENABLED
+  DISABLED
+  ERROR
+}
+
+// A plugin's installed state — not its code (that lives on disk under the
+// `plugins/` runtime directory, one subfolder per plugin). `permissions`
+// is validated against a known allow-list at manifest-parse time
+// (pluginManifest.ts) but is NOT currently enforced as a runtime
+// capability gate — no plugin entry point is ever required/loaded
+// anywhere in this codebase (a deliberate, documented scope boundary; see
+// deployment/plugins/pluginService.ts's own header comment and
+// docs/DEPLOYMENT.md's Plugin Management section). A future runtime
+// loader would need to check `permissions` before granting access, the
+// same least-privilege posture the Permission Engine (Phase 7) already
+// established for connector data access — recorded here for that reason,
+// not because it's already enforced.
+model Plugin {
+  id             String       @id @default(cuid())
+  installationId String
+  installation   Installation @relation(fields: [installationId], references: [id], onDelete: Cascade)
+
+  name         String
+  version      String
+  entryPoint   String
+  permissions  Json
+  /// The full plugin.json manifest, kept verbatim for the admin UI / audit trail beyond just the fields this table promotes to columns.
+  manifest     Json
+  status       PluginStatus @default(DISABLED)
+  errorMessage String?
+
+  installedAt DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([installationId, name])
+  @@map("plugins")
+}
+
+enum LicenseTier {
+  STANDARD
+  ENTERPRISE
+  AGENCY
+}
+
+enum LicenseStatus {
+  ACTIVE
+  EXPIRED
+  INVALID
+  REVOKED
+}
+
+// Local license validation state — NOT a SaaS license-server record (this
+// product has no such server; see license/licenseValidator.ts). One
+// license per installation, activated against this specific machine's
+// hardware fingerprint (offline-capable: validation is a local signature
+// check, not a network call to anywhere).
+model License {
+  id             String       @id @default(cuid())
+  installationId String       @unique
+  installation   Installation @relation(fields: [installationId], references: [id], onDelete: Cascade)
+
+  licenseKey         String
+  tier               LicenseTier
+  machineFingerprint String
+  status             LicenseStatus
+  issuedAt           DateTime
+  expiresAt          DateTime?
+  activatedAt        DateTime      @default(now())
+  lastValidatedAt    DateTime      @default(now())
+  /// The full signed license payload (license/licenseValidator.ts) — kept so re-validation (e.g. after a restart) never needs the original license file again.
+  payload            Json
+
+  @@map("licenses")
+}

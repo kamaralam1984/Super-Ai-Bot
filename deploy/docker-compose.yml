@@ -1,0 +1,192 @@
+# KVL Super AI Chatbot — production Docker Compose stack.
+#
+# Run from the monorepo root (build contexts are `.` relative to this
+# file's parent, i.e. the repo root) — see deploy/scripts/install.sh,
+# which is the supported way to bring this stack up on a fresh server.
+# For local/manual use:
+#   cd deploy && docker compose --env-file ../.env up -d
+#
+# Services map 1:1 to what's genuinely architecturally separate in this
+# product — see backend.Dockerfile's header comment for why "AI Engine" /
+# "Scanner" / "Connector Engine" / "Background Workers" are NOT separate
+# containers here (they run in-process inside `backend`), why there is
+# no standalone "vector-database" service (it's an embedded, file-based
+# HNSW index — see backend_embeddings volume below), and why there is no
+# separate "backup" service either (deployment/backup/backupService.ts
+# runs in-process in `backend`, on the same in-process CronRuntime Phase
+# 10's Scheduled Recrawling already uses — see docs/DEPLOYMENT.md).
+
+name: kvl-super-ai-chatbot
+
+networks:
+  kvl_internal:
+    driver: bridge
+  kvl_edge:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  backend_logs:
+  backend_storage:
+  backend_cache:
+  backend_uploads:
+  backend_models:
+  backend_embeddings:
+  backend_knowledge:
+  backend_config:
+  backend_backups:
+  backend_plugins:
+  backend_connectors:
+  backend_temp:
+  certbot_webroot:
+  certbot_certs:
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - kvl_internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    networks:
+      - kvl_internal
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD} ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  backend:
+    image: kvl-backend:${IMAGE_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: deploy/docker/backend.Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+    volumes:
+      - ../.env:/app/.env
+      - backend_logs:/app/logs
+      - backend_storage:/app/storage
+      - backend_cache:/app/cache
+      - backend_uploads:/app/uploads
+      - backend_models:/app/models
+      - backend_embeddings:/app/embeddings
+      - backend_knowledge:/app/knowledge
+      - backend_config:/app/config
+      - backend_backups:/app/backups
+      - backend_plugins:/app/plugins
+      - backend_connectors:/app/connectors
+      - backend_temp:/app/temp
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - kvl_internal
+      - kvl_edge
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+  frontend:
+    image: kvl-frontend:${IMAGE_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: deploy/docker/frontend.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - backend
+    networks:
+      - kvl_edge
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    # Runs nginx normally AND a background loop that gracefully reloads
+    # it every 12h — the only way a certbot-renewed certificate (renewed
+    # in a *separate* container, see the `certbot` service) actually
+    # gets picked up, since nginx loads TLS certificates into worker
+    # memory once and does not re-read them per-request. A reload with
+    # nothing changed is a harmless no-op (zero dropped connections);
+    # deliberately not sharing the Docker socket with either container
+    # to trigger this on-demand instead, which this product's zero-trust
+    # posture treats as a real privilege-escalation risk not worth the
+    # up-to-12h-faster reload it would buy.
+    command: >
+      sh -c 'while :; do sleep 12h & wait $${!}; nginx -s reload; done & exec nginx -g "daemon off;"'
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - certbot_webroot:/var/www/certbot:ro
+      - certbot_certs:/etc/letsencrypt:ro
+    environment:
+      DOMAIN: ${DOMAIN}
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - kvl_edge
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  certbot:
+    image: certbot/certbot:latest
+    restart: unless-stopped
+    volumes:
+      - certbot_webroot:/var/www/certbot
+      - certbot_certs:/etc/letsencrypt
+    # Real ACME renewal loop, not a one-shot placeholder: checks twice a
+    # day (Let's Encrypt's own recommended cadence) and only actually
+    # renews certs within their real renewal window (~30 days of expiry).
+    # See deploy/scripts/ssl-init.sh for the FIRST certificate request,
+    # which this container does not perform (it has no domain/email
+    # arguments here on purpose — issuance is an explicit, one-time admin
+    # action, whereas renewal of an already-issued cert is safe to fully
+    # automate).
+    entrypoint: >
+      sh -c 'trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done'

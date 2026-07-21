@@ -52,6 +52,68 @@ VPS/dedicated server/local Linux machine.
   every time); a post-training integrity check; and a persisted training
   report. See
   [docs/AI_TRAINING_ENGINE.md](docs/AI_TRAINING_ENGINE.md).
+- **Phase 7 — Enterprise Permission & Connector Access Engine**: closes
+  the one real gap Phase 5/6 left open — a Permission Wizard letting an
+  administrator individually authorize each of 12 data categories
+  (Products, Services, FAQs, Orders, Customers, Inventory, Appointments,
+  Categories, Pricing, Shipping, Blogs, Support Articles), always
+  `READ_ONLY` by construction, per installation or per Phase 5 connector;
+  a durable audit trail of every grant, revoke, and access check; and two
+  integration points — `AuthorizedTrainingRecordService` and
+  `authorizedAiToolLayer` — that make the AI Training Engine and the
+  Connector AI tool layer actually consume data through this
+  authorization layer instead of assuming direct access. Reuses Phase 5's
+  OAuth2/credential-vault/health-monitoring machinery as-is rather than
+  duplicating it. See
+  [docs/PERMISSION_ENGINE.md](docs/PERMISSION_ENGINE.md).
+- **Phase 8 — Enterprise AI Live Chat Engine**: the conversational layer
+  that actually talks to website visitors — a full RAG pipeline (intent
+  detection, language detection across 10 languages, hybrid retrieval
+  grounded in Phase 3's knowledge base and Phase 7's authorized connector
+  tools, hallucination prevention, source citations) with real multi-turn
+  short-/long-term memory, token streaming over WebSocket, a pluggable LLM
+  provider (Anthropic Claude, or a fully self-hosted Ollama/vLLM/LM Studio
+  endpoint with zero external calls), a rule-based escalation engine, and
+  conversation analytics. This product's first genuinely public-facing
+  surface — see
+  [docs/CHAT_ENGINE.md](docs/CHAT_ENGINE.md).
+- **Phase 9 — Universal Backend Connector Engine Extensions**: extends
+  Phase 5's Smart Connector Engine in place (rather than a second, parallel
+  connector system) with what a full spec audit found genuinely missing —
+  SOAP and gRPC protocol clients (the latter tested against a real local
+  gRPC server), Mutual TLS and OpenID Connect authentication, real SSL
+  certificate validation, seven additional AI tools (`searchProducts`,
+  `getProductDetails`, `searchServices`, `getOrders`, `getCustomer`,
+  `searchCustomer`, `searchAppointments`), a Connection Manager (priority
+  ordering + automatic failover across multiple connectors, a bounded
+  retry queue), and an HSM-readiness abstraction in the credential vault.
+  See [docs/CONNECTOR_EXTENSIONS.md](docs/CONNECTOR_EXTENSIONS.md).
+- **Phase 10 — Automatic Website Update Engine**: keeps the AI knowledge
+  base current without manual retraining — entity-level change detection
+  (product price/stock, service pricing, FAQ answers, policy content,
+  contact details, sitemap/robots.txt/technology stack), a persisted
+  Knowledge Comparison Report per training run, cron-based scheduled
+  recrawling (hourly/daily/weekly/monthly presets or a raw expression,
+  survives a restart), a generic priority/retry background job system, a
+  Dashboard/Log/Email/Webhook notification engine, an HMAC-verified
+  webhook-triggered on-demand scan endpoint, and training-run-level
+  rollback (extends Phase 3's per-chunk rollback to whole-run scope). See
+  [docs/AUTO_UPDATE_ENGINE.md](docs/AUTO_UPDATE_ENGINE.md).
+- **Phase 11 — Enterprise Production Deployment System**: one-click
+  Docker installation (`deploy/scripts/install.sh` — checks requirements,
+  installs Docker if missing, generates secrets, brings up the full
+  stack, requests SSL, verifies health), a production Docker Compose
+  stack (frontend/backend/postgres/redis/nginx/certbot — no fake
+  microservices for what's actually one in-process backend, see
+  `deploy/docker/backend.Dockerfile`), automatic Let's Encrypt SSL with
+  renewal, safe updates with automatic rollback on a failed health check,
+  a Backup/Restore Manager (Postgres + Redis + every data directory,
+  checksummed, retention-enforced), a 12-dimension Health Check Engine
+  and Prometheus `/metrics` endpoint, Plugin Management (validated
+  manifests, least-privilege permissions — lifecycle only, no code
+  execution, stated honestly), and offline Ed25519 License Management
+  (no SaaS license server, consistent with this product's self-hosted
+  positioning). See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## Quick start (development)
 
@@ -67,10 +129,21 @@ npm run dev:backend    # installer server on :4500
 npm run dev:frontend   # wizard UI on :5173 (proxies /api and /socket.io to :4500)
 ```
 
-Open the frontend dev URL in a browser and walk through the wizard. In
-production, `npm run build` produces a static frontend bundle that the
-backend serves directly from a single port (see
-[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)).
+Open the frontend dev URL in a browser and walk through the wizard.
+
+## Production deployment
+
+```bash
+git clone <this repository> kvl-super-ai-chatbot && cd kvl-super-ai-chatbot
+sudo ./deploy/scripts/install.sh --domain chat.example.com --email admin@example.com \
+  --website-name "Acme Corp" --website-url "https://acme.example.com"
+```
+
+One command: checks requirements, installs Docker if missing, generates
+secrets, builds and starts the full stack, requests a TLS certificate,
+verifies health. See [docs/INSTALLATION_GUIDE.md](docs/INSTALLATION_GUIDE.md)
+for the full walkthrough (including the bare-metal/no-Docker path) and
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the architecture behind it.
 
 ### Database admin access
 

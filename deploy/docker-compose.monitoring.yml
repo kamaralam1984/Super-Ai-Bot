@@ -1,0 +1,59 @@
+# Optional monitoring overlay — Prometheus + Grafana, scraping the
+# backend's real /metrics endpoint (backend/src/deployment/monitoring/
+# metrics.ts). Not part of the default stack (deploy/docker-compose.yml)
+# since not every self-hosted install wants or needs a full metrics
+# stack running — genuinely optional infrastructure, not a placeholder.
+#
+# Usage (from deploy/):
+#   docker compose -f docker-compose.yml -f docker-compose.monitoring.yml --env-file ../.env up -d
+#
+# Both services join the same kvl_internal network the main stack
+# defines (declared `external: true` below — this file assumes
+# docker-compose.yml has already created it) so Prometheus can reach
+# `backend:4500` without exposing the backend any more broadly than the
+# main stack already does.
+
+name: kvl-super-ai-chatbot
+
+networks:
+  kvl_internal:
+    external: true
+    name: kvl-super-ai-chatbot_kvl_internal
+
+volumes:
+  prometheus_data:
+  grafana_data:
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - kvl_internal
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  grafana:
+    image: grafana/grafana:latest
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env before enabling this overlay}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana-datasource.yml:/etc/grafana/provisioning/datasources/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:3000:3000" # loopback-only by default — put behind the main nginx (or an SSH tunnel) rather than exposing directly; see docs/DEPLOYMENT.md's Monitoring section
+    networks:
+      - kvl_internal
+    depends_on:
+      - prometheus
+    deploy:
+      resources:
+        limits:
+          memory: 256m

@@ -1,0 +1,50 @@
+[Unit]
+Description=KVL Super AI Chatbot — backend server
+Documentation=https://github.com/your-org/kvl-super-ai-chatbot/blob/main/docs/DEPLOYMENT.md
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Substitute the real installation path and app user (matching
+# deploy/scripts/install.sh's --app-user, default "kvl") before enabling
+# this unit — see docs/DEPLOYMENT.md's "Bare-metal / systemd" section for
+# the exact `sed` command install.sh's non-Docker path runs to fill these
+# in automatically.
+User=kvl
+Group=kvl
+WorkingDirectory=/opt/kvl-super-ai-chatbot/backend
+EnvironmentFile=/opt/kvl-super-ai-chatbot/.env
+ExecStart=/usr/bin/node dist/index.js
+
+# Crash Recovery / Automatic Restart — restarts on any non-zero exit or
+# crash (segfault, OOM-kill, uncaught exception reaching index.ts's own
+# process.exit(1) handler), but deliberately not on a clean `systemctl
+# stop`. Capped at 5 restarts per 60s so a genuinely broken deploy (bad
+# migration, missing secret) fails loudly instead of respawning forever
+# and flooding the log.
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Least-privilege hardening — this process needs to write to its own
+# runtime directories and talk to the network (Postgres/Redis/outbound
+# HTTP); it needs nothing else from the host.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/kvl-super-ai-chatbot/logs /opt/kvl-super-ai-chatbot/storage /opt/kvl-super-ai-chatbot/cache /opt/kvl-super-ai-chatbot/uploads /opt/kvl-super-ai-chatbot/models /opt/kvl-super-ai-chatbot/embeddings /opt/kvl-super-ai-chatbot/knowledge /opt/kvl-super-ai-chatbot/config /opt/kvl-super-ai-chatbot/backups /opt/kvl-super-ai-chatbot/plugins /opt/kvl-super-ai-chatbot/connectors /opt/kvl-super-ai-chatbot/temp
+
+# journald is this deployment mode's log destination — the app's own
+# winston transport already writes structured JSON to stdout in addition
+# to logs/installer.log (see utils/logger.ts), so `journalctl -u
+# kvl-backend` shows the same structured events a Docker deployment's
+# `docker compose logs backend` would.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kvl-backend
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+# Prometheus scrape config for the optional monitoring overlay
+# (deploy/docker-compose.monitoring.yml). Scrapes the backend's own
+# /metrics directly over the internal Docker network — never through the
+# public nginx edge (see backend/src/deployment/monitoring/metrics.ts).
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: kvl-backend
+    static_configs:
+      - targets: ["backend:4500"]
+    metrics_path: /metrics

@@ -1,0 +1,742 @@
+# API Reference
+
+Base URL: `http://<host>:<INSTALLER_PORT>/api` (default port `4500`). Every
+response is `{ success: true, data: ... }` or `{ success: false, error:
+{ title, message, suggestedFix, retryable } }`.
+
+## `GET /health`
+
+Not under `/api`. Liveness probe. `{ status, installed, env, timestamp }`.
+
+## `GET /api/system-check`
+
+Step 1. Runs CPU/RAM/Disk/Node/Python/Docker/Docker Compose/Git/Redis/
+PostgreSQL/Internet checks concurrently against the real host. Returns
+`RequirementCheckResult` (`items[]`, `allRequiredPassed`, `checkedAt`).
+PostgreSQL/Redis are only `required: true` when Docker isn't available as a
+fallback provisioning path.
+
+## `GET /api/environment`
+
+Step 2. Returns `EnvironmentInfo`: OS, hostname, timezone, public IP, local
+HTTPS/SSL detection, port availability, firewall, web server, Docker status.
+
+## `POST /api/website-validation`
+
+Step 3. Body: `{ websiteName, websiteUrl }`. Returns `WebsiteValidationResult`
+covering DNS, SSL (via a direct TLS probe, not just fetch), HTTPS support,
+HTTP→HTTPS redirect, reachability, robots.txt/sitemap.xml, homepage
+availability, and an `overallValid` flag.
+
+## `POST /api/configuration`
+
+Step 4/5. Body: `{ websiteName, websiteUrl }`. Generates Application ID,
+Installation ID, all security secrets, and database/vector-DB/Redis config;
+writes everything to `.env` (mode `0600`). Returns `GeneratedConfig` —
+**never** includes secret values, only non-sensitive identifiers and
+connection metadata (host/port/name/user, no passwords).
+
+## `POST /api/database/initialize`
+
+Step 6. Reads `DATABASE_URL`/`DB_PASSWORD` from the current process
+environment (written by the Configuration step), creates the Postgres role +
+database if they don't already exist, then runs `prisma migrate deploy`.
+Idempotent — safe to call again.
+
+## `GET /api/database/status`
+
+Runs `prisma migrate status` against the current `DATABASE_URL`.
+
+## `POST /api/database/rollback`
+
+Drops the database and role described by the current `.env`. Used
+automatically by the install orchestrator when the database step itself
+fails partway; also callable directly.
+
+## `POST /api/directories`
+
+Step 7. Creates all twelve runtime directories under `APP_ROOT` with mode
+`0750`. Idempotent — existing directories are left alone (permissions are
+re-asserted).
+
+## `POST /api/install/start`
+
+Step 8/9. Body: `{ websiteName, websiteUrl, socketId }`. Returns
+`{ started: true }` immediately; all real progress is delivered over the
+caller's own Socket.IO room (`socketId`) as:
+
+- `install:progress` — `InstallProgressEvent { stepId, label, status: "running"|"success"|"error", message, progressPercent, timestamp, durationMs? }`
+- `install:error` — `InstallErrorDetail { stepId, title, message, suggestedFix, retryable }`
+
+## `GET /api/logs?limit=100`
+
+Step 11. Tails `logs/installer.log` (structured JSON lines) and returns the
+most recent `InstallLogEntry[]` (max 500). Backs the wizard's "View
+Installation Logs" panel on the error screen.
+
+---
+
+# Phase 2 — Website Auto Scanner API
+
+See [docs/SCANNER.md](SCANNER.md) for the full pipeline and security design.
+
+## `POST /api/scan/start`
+
+Body: `{ websiteUrl, socketId, maxDepth?, maxPages?, concurrency? }`
+(`maxDepth` 1–10, default 3; `maxPages` 1–2000, default 200; `concurrency`
+1–20, default 5). Requires a completed Phase 1 installation to already
+exist — resolves the target database from the current `.env` and the most
+recently completed `Installation` row automatically; no separate
+installation ID needs to be passed in. Returns `{ started: true }`
+immediately; all progress streams over the caller's own Socket.IO room
+(`socketId`) as:
+
+- `scan:progress` — `{ phase: "discovering"|"crawling"|"processing_documents"|"generating_report"|"completed"|"failed", message, pagesProcessed?, pagesTotal? }`
+- `scan:complete` — `{ crawlJobId, report: CrawlReportOutput }`
+- `scan:error` — `{ crawlJobId, message }`
+
+`CrawlReportOutput` shape (also persisted to the `crawl_reports` table):
+`websiteInfo`, `techStack`, `totalPages`, `scannedPages`, `failedPages`,
+`productsFound`, `servicesFound`, `blogsFound`, `documentsFound`,
+`imagesFound`, `faqsFound`, `formsFound`, `languages` (per-language page
+counts), `seoSummary`, `performanceSummary`, `errors`, `warnings`,
+`securityObservations`.
+
+Everything the scan discovers is queryable directly from Postgres after the
+fact: `crawl_jobs`, `crawled_pages`, `extracted_products`,
+`extracted_services`, `extracted_faqs`, `processed_documents`,
+`knowledge_chunks` (see [docs/SCANNER.md](SCANNER.md) and
+`backend/prisma/schema.prisma`) — there is no separate "fetch results"
+endpoint yet; the report event plus direct DB access covers Phase 2's
+scope.
+
+---
+
+# Phase 3 — Enterprise AI Knowledge Builder API
+
+See [docs/KNOWLEDGE_BUILDER.md](KNOWLEDGE_BUILDER.md) for the full pipeline,
+architecture decisions, and real-world testing findings. Every route below
+requires an `x-api-key` header matching the installation's `API_SECRET`
+(generated by Phase 1 into `.env`) and is rate-limited per API key (or per
+IP if no key is given) — 20-request burst, 2 requests/sec sustained.
+Missing/invalid keys get `401`; exceeding the limit gets `429`.
+
+## `POST /api/knowledge/build`
+
+Body: `{ crawlJobId, socketId }`. Runs the full Phase 3 pipeline (clean →
+chunk → categorize → detect language → embed → deduplicate → score →
+version → index) for one completed Phase 2 crawl job. Returns
+`{ started: true }` immediately; all progress streams over the caller's
+own Socket.IO room (`socketId`) as:
+
+- `knowledge:progress` — `{ step, message, percent }`
+- `knowledge:complete` — `{ success, crawlJobId, chunksCreated, chunksUpdated, chunksUnchanged, duplicatesFound, vectorCount }`
+- `knowledge:error` — `{ crawlJobId, message }`
+
+Safe to call again for the same installation's later crawl jobs — chunks
+matching an existing page+section are versioned in place (their prior
+content archived to `chunk_versions`) rather than duplicated; unchanged
+content is skipped entirely.
+
+## `POST /api/knowledge/search`
+
+Body: `{ query, mode?, category?, language?, k? }` — `mode` is
+`"semantic" | "keyword" | "hybrid"` (default `"hybrid"`); `category` must
+be one of the 17 taxonomy values (see `KNOWLEDGE_BUILDER.md`); `language`
+filters to a detected language name (e.g. `"English"`, `"Hinglish"`); `k`
+(1–20, default 5) caps how many chunks are considered before citation
+filtering. Resolves the target installation automatically the same way
+`/api/scan/start` does.
+
+Response `data` is either:
+
+```jsonc
+// answered:
+{ "answered": true, "sources": [{ "chunkId", "sourceUrl", "title", "category", "excerpt", "confidenceScore", "relevanceScore" }], "overallConfidence": 0.62, "tookMs": 301, "cached": false }
+
+// refused — nothing cleared the confidence floor, or the knowledge base is empty:
+{ "answered": false, "reason": "...", "tookMs": 46, "cached": false }
+```
+
+Every call is logged to `search_query_logs` (query text, detected query
+language, mode, result count, top chunk IDs, latency) regardless of
+whether it was answered or refused. Identical repeat queries (same
+installation + normalized query + mode + filters) within 60 seconds are
+served from an in-process cache — verified against a real running server
+at ~0ms vs. ~300ms for the original call.
+
+## `POST /api/knowledge/rollback`
+
+Body: `{ chunkId, targetVersion }`. Reverts a chunk's live content to an
+earlier archived version — **forward-only** (like `git revert`, not
+`git reset --hard`): the current live state is itself archived as a new
+version before being overwritten, so the full history (including the
+rollback event) stays intact. Returns `{ chunkId, version }` — the new
+live version number. `404` if the chunk doesn't exist; `400` if
+`targetVersion` doesn't exist in that chunk's history or is already live.
+
+---
+
+# Phase 4 — Enterprise Smart Technology Detection Engine API
+
+See [docs/TECH_DETECTION.md](TECH_DETECTION.md) for the full detection
+pipeline, confidence-scoring design, and real-world testing findings.
+Every route below requires the same `x-api-key: <API_SECRET>` header and
+per-caller rate limiting (20-request burst, 2 requests/sec sustained) as
+`/api/knowledge/*`.
+
+## `POST /api/techdetect/start`
+
+Body: `{ crawlJobId, socketId }` — `crawlJobId` must be an existing Phase 2
+crawl job (any status; only its `websiteUrl` is used, no crawled page data
+is required). Returns `{ started: true }` immediately; progress streams
+over the caller's own Socket.IO room (`socketId`) as:
+
+- `techdetect:progress` — `{ step, message, percent }`
+- `techdetect:complete` — `{ success, crawlJobId, report: TechnologyReport }`
+- `techdetect:error` — `{ crawlJobId, message }`
+
+Safe to call again for the same `crawlJobId` — the report is upserted
+(one `TechDetectionReport` row per crawl job), not duplicated.
+
+## `GET /api/techdetect/:crawlJobId`
+
+Fetches the persisted `TechnologyReport` for a crawl job. `404` if
+technology detection hasn't been run for that `crawlJobId` yet (run
+`POST /api/techdetect/start` first). Response `data` shape: every
+category (`cms`, `frontendFrameworks`, `backendFrameworks`,
+`programmingLanguages`, `hosting`, `server`, `cdn`, `database`,
+`jsLibraries`, `cssFrameworks`, `seoTools`, `analytics`,
+`paymentGateways`, `authentication`, `liveChat`, `forms`) is a
+`{ name, confidence, evidence }[]` array sorted best-first, plus
+`security: { findings, score }`, `performance: { findings, score }`,
+`overallConfidence`, `recommendations: string[]`, and
+`smartConnectorCompatibility: { compatible, recommendedConnectors, notes }`.
+
+---
+
+# Phase 5 — KVL Smart Connector Engine API
+
+See [docs/SMART_CONNECTOR.md](SMART_CONNECTOR.md) for the full pipeline,
+read-only enforcement design, and real-world testing findings. Every route
+below requires the same `x-api-key: <API_SECRET>` header and per-caller
+rate limiting (20-request burst, 2 requests/sec sustained) as every other
+authenticated API in this product.
+
+## `POST /api/connector/start`
+
+Body: `{ installationId, crawlJobId?, manualConnectorType?, manualBaseUrl?, credential?, socketId }`.
+`crawlJobId` (if supplied) must have a Phase 4 `TechnologyReport` already
+generated — its recommendation drives connector type/auth/base URL unless
+overridden by `manualConnectorType`/`manualBaseUrl`. `credential` is
+optional (omit for a `NONE`-auth connector against public endpoints) and
+matches `RawCredentialInput`'s shape for whichever `authMethod` you pick
+(`API_KEY`, `BEARER_TOKEN`, `JWT`, `OAUTH2`, `BASIC_AUTH`, `SESSION`,
+`CUSTOM_HEADER`, `SIGNED_REQUEST`, `NONE`) — see `connector/types.ts`.
+Returns `{ started: true }` immediately; progress streams over the
+caller's Socket.IO room (`socketId`) as:
+
+- `connector:progress` — `{ step, message, percent }`
+- `connector:complete` — `{ success, connectorId, report: ConnectorReport }`
+- `connector:error` — `{ message }`
+
+## `GET /api/connector?installationId=...`
+
+Lists every connector configured for an installation.
+
+## `GET /api/connector/:id`
+
+Fetches a freshly-assembled `ConnectorReport` for one connector, recomputed
+from its current persisted state (not a stale cached snapshot). `404` if
+the connector doesn't exist.
+
+## `POST /api/connector/:id/health-check`
+
+Runs an on-demand health check; if it fails, automatically attempts
+reconnection (OAuth2 token refresh if expired, then up to 3 bounded
+retries with backoff) before reporting the final status. Response `data`:
+`{ status, initial: HealthCheckResult, reconnection: ReconnectionResult | null }`.
+
+## `POST /api/connector/:id/tools/:toolName`
+
+Invokes one of the connector-backed AI tools — `toolName` must be one of
+`getProducts`, `getServices`, `getOrderStatus`, `getAppointments`,
+`getInventory`. Body: `{ orderId? }` (only used by `getOrderStatus`).
+Permission-checked before any outbound call is made: the connector must be
+`CONNECTED`/`DEGRADED` and have a validated endpoint for that category, or
+the response is `{ success: false, data: { ok: false, error: "..." } }`
+with no network call ever attempted.
+
+## `POST /api/connector/tools/search-knowledge`
+
+Body: `{ installationId, query, category?, language?, k? }`. The one AI
+tool that isn't connector-backed — wired directly to Phase 3's
+`performKnowledgeSearch`. Kept on this router since it shares the same
+AI-tool permission surface and auth gate as the connector-backed tools.
+
+## `GET /api/connector/meta/ai-tools`
+
+Returns the fixed list of AI tool names this engine exposes — a small
+convenience endpoint for a chatbot's tool-calling setup to introspect
+without hardcoding the list twice. Now 13 tools (7 added in Phase 9 — see
+below): `getProducts`, `searchProducts`, `getProductDetails`,
+`getServices`, `searchServices`, `getOrderStatus`, `getOrders`,
+`getCustomer`, `searchCustomer`, `getInventory`, `getAppointments`,
+`searchAppointments`, `searchKnowledge`.
+
+## `PATCH /api/connector/:id/priority`
+
+Body: `{ priority: number }` — lower value is tried first when more than
+one connector for this installation can serve the same category. See
+docs/CONNECTOR_EXTENSIONS.md's Connection Manager section.
+
+---
+
+# Phase 9 — Universal Backend Connector Engine Extensions API
+
+See [docs/CONNECTOR_EXTENSIONS.md](CONNECTOR_EXTENSIONS.md) for the full
+design and an honest accounting of what's new versus what Phase 5 already
+covered. These routes live under the existing `connectorRouter` and keep
+its `x-api-key: <API_SECRET>` + rate-limit gate — internal/admin only,
+unlike Phase 8's public chat routes.
+
+## `POST /api/connector/:id/tools/:toolName`
+
+Extended in place — `toolName` now also accepts `searchProducts`,
+`getProductDetails`, `searchServices`, `getOrders`, `getCustomer`,
+`searchCustomer`, `searchAppointments` alongside the original five. Body:
+`{ orderId?, productId?, customerId?, query? }` — which field is required
+depends on `toolName` (e.g. `searchProducts` requires `query`,
+`getCustomer` requires `customerId`); a missing required field is a `400`
+naming exactly what's missing.
+
+## `POST /api/connector/:id/soap-call`
+
+Body: `{ path, action, operationName, parameters? }`. Invokes one SOAP
+operation on a `SOAP_API` connector. `action` must be on that connector's
+configured `allowedActions` list — otherwise a `403` naming the allowed
+actions, before any request reaches the target system.
+
+## `POST /api/connector/:id/grpc-call`
+
+Body: `{ methodName, request }`. Invokes one unary RPC method on a
+`GRPC_API` connector. `methodName` must be on that connector's configured
+`allowedMethods` list — same enforcement shape as the SOAP route above.
+
+---
+
+# Phase 6 — Enterprise AI Training Engine API
+
+See [docs/AI_TRAINING_ENGINE.md](AI_TRAINING_ENGINE.md) for the full
+pipeline, the knowledge relationship graph design, and real-world testing
+findings. Every route below requires the same `x-api-key: <API_SECRET>`
+header and per-caller rate limiting (20-request burst, 2 requests/sec
+sustained) as every other authenticated API in this product.
+
+## `POST /api/training/start`
+
+Body: `{ crawlJobId, socketId }`. Automatically incremental when a prior
+`COMPLETED` crawl job exists for the same installation + website (only
+new/modified content is reprocessed); a full build otherwise. Returns
+`{ started: true }` immediately; progress streams over the caller's
+Socket.IO room as:
+
+- `training:progress` — `{ step, message, percent }`
+- `training:complete` — `{ success, crawlJobId, report: TrainingReportData }`
+- `training:error` — `{ crawlJobId, message }`
+
+## `POST /api/training/retrain`
+
+Same body/behavior as `/start` — a distinct entry point for "manual
+retraining," recorded via a dedicated audit event
+(`training_retrain_requested`) so a manually-triggered run is
+distinguishable from one fired by `/start` right after a crawl completes.
+
+## `POST /api/training/schedule`
+
+Body: `{ installationId, crawlJobId, intervalMs, socketId }` —
+`intervalMs` must be at least 60000 (60s floor). Registers a recurring
+retrain. **In-process only** — does not survive a server restart (see
+docs/AI_TRAINING_ENGINE.md's "Known limitations"). Returns
+`{ handleId }`.
+
+## `GET /api/training/schedule`
+
+Lists every currently active recurring schedule.
+
+## `DELETE /api/training/schedule/:handleId`
+
+Cancels a recurring schedule. Returns `{ cancelled: boolean }`.
+
+## `GET /api/training/report/:crawlJobId`
+
+Fetches the persisted `TrainingReportData` for a crawl job. `404` if
+training hasn't been run for that `crawlJobId` yet.
+
+## `GET /api/training/reports?installationId=...`
+
+Chronological training-run history for an installation, most recent
+first — the "Knowledge Timeline" view.
+
+## `GET /api/training/relationships?installationId=...`
+
+The full knowledge relationship graph for an installation:
+`{ id, sourceType, sourceId, targetType, targetId, relationshipType,
+confidence, evidence, createdAt }[]`. Permission-checked per edge — see
+docs/PERMISSION_ENGINE.md.
+
+---
+
+# Phase 7 — Enterprise Permission & Connector Access Engine API
+
+See [docs/PERMISSION_ENGINE.md](PERMISSION_ENGINE.md) for the full design,
+the 12-category catalog, and known limitations. Every route below requires
+the same `x-api-key: <API_SECRET>` header and per-caller rate limiting as
+every other authenticated API in this product.
+
+## `GET /api/permission/scopes`
+
+Returns the static catalog of all 12 data-scope definitions (`scope`,
+`label`, `description`, `category`, `sensitivity`, `appliesTo`) — what the
+Permission Wizard UI renders as its checklist.
+
+## `GET /api/permission/wizard?installationId=...&connectorId=...`
+
+Current wizard state: every scope applicable to the target (the
+installation's own knowledge base if `connectorId` is omitted, or one
+specific Phase 5 connector) plus whether it's currently granted.
+
+## `POST /api/permission/wizard`
+
+Body: `{ installationId, connectorId?, grantedScopes: DataScope[], actor, notes? }`.
+Applies a full wizard submission — grants every newly-checked scope,
+revokes every previously-active scope that's now unchecked, leaves the
+rest untouched. Returns `{ granted, revoked, unchanged, state }`.
+
+## `POST /api/permission/grant`
+
+Body: `{ installationId, connectorId?, dataScope, grantedBy, notes? }`. A
+lighter-weight alternative to a full wizard submission for toggling one
+category at a time.
+
+## `POST /api/permission/revoke`
+
+Body: `{ installationId, connectorId?, dataScope, revokedBy }`.
+
+## `GET /api/permission/grants?installationId=...&connectorId=...`
+
+Full grant history (active + revoked) — the "who authorized what, and
+when" view.
+
+## `GET /api/permission/events?installationId=...&limit=50`
+
+The Permission Engine's own audit trail: every grant, revoke, wizard
+completion, and access check (allowed or denied).
+
+## `POST /api/permission/check`
+
+Body: `{ installationId, connectorId?, dataScope, purpose }`. Diagnostic
+endpoint — evaluates one access request without performing any data read.
+Internal consumers (the Training Engine, the AI tool layer) call
+`PermissionOrchestratorService.checkAccess()` directly in-process; this
+route exists for an admin UI explaining why a given AI tool call would be
+blocked.
+
+---
+
+# Phase 8 — Enterprise AI Live Chat Engine API
+
+See [docs/CHAT_ENGINE.md](CHAT_ENGINE.md) for the full RAG pipeline,
+memory design, and known limitations.
+
+**Security note**: unlike every router above, the routes under
+`/api/chat/` (excluding `/api/chat/admin/*`) require **no** `x-api-key`
+header — they're the public, visitor-facing surface an anonymous browser
+calls from an embedded chat widget, rate-limited per visitor fingerprint
+instead. Only `/api/chat/admin/*` keeps the standard
+`x-api-key: <API_SECRET>` + rate-limit gate. See CHAT_ENGINE.md's
+"A new kind of surface for this product".
+
+## `POST /api/chat/session`
+
+Body: `{ installationId, visitorFingerprint?, preferredLanguage? }`.
+Starts a new conversation or resumes the visitor's most recent open one.
+Returns `{ visitorFingerprint, isNewVisitor, conversationId,
+isNewConversation, status, language }` — the client persists
+`visitorFingerprint` (e.g. `localStorage`) and sends it back on every
+future call.
+
+## `POST /api/chat/message`
+
+Body: `{ installationId, conversationId, message, businessName }`.
+Non-streaming REST fallback — waits for the complete reply. Returns the
+full `ProcessMessageResult`: `{ userMessageId, assistantMessageId,
+content, intent, language, sources, confidence, suggestedQuestions,
+quickActions, escalated, escalationTicketId, groundingAudit, tookMs }`.
+Prefer the WebSocket path below for a real chat UI with token streaming.
+
+## `GET /api/chat/conversations/:conversationId/messages`
+
+Full message history for a conversation, oldest first — used to restore
+a chat window on page reload.
+
+## `POST /api/chat/messages/:messageId/feedback`
+
+Body: `{ feedback: "LIKE" | "DISLIKE" | "NONE" }`.
+
+## `POST /api/chat/conversations/:conversationId/share`
+
+Creates (or rotates) a share link. Returns `{ shareToken, expiresAt }`
+(7-day expiry).
+
+## `GET /api/chat/shared/:shareToken`
+
+Public, read-only view of a shared conversation — `{ conversation,
+messages }`. `404` if the token is missing, unknown, or expired.
+
+## `GET /api/chat/conversations/:conversationId/export?format=text`
+
+Conversation Export. JSON (`{ conversation, messages }`) by default, or a
+plain-text transcript with `?format=text`.
+
+## WebSocket events (`chat/ws/chatSocket.ts`)
+
+Registered on the same Socket.IO server every other phase's progress
+events use, as an additional `connection` listener — no separate
+namespace/port.
+
+- **`chat:start`** (emit) → `{ installationId, visitorFingerprint?, preferredLanguage? }` — same semantics as `POST /api/chat/session`.
+- **`chat:started`** (listen) → `{ visitorFingerprint, isNewVisitor, conversationId, isNewConversation, status, language }`.
+- **`chat:message`** (emit) → `{ installationId, conversationId, message, businessName }`.
+- **`chat:thinking`** (listen) → `{ conversationId }` — fired immediately, before retrieval/generation starts (drives the "AI Thinking" animation).
+- **`chat:delta`** (listen) → `{ conversationId, delta }` — one per generated token/chunk (drives the typing effect). Not emitted at all on the ungrounded/refusal path's single combined message.
+- **`chat:complete`** (listen) → the full `ProcessMessageResult`, same shape as the REST fallback's response.
+- **`chat:error`** (listen) → `{ conversationId?, message }`.
+
+## `GET /api/chat/admin/conversations?installationId=...&status=...`
+
+Lists conversations for an installation, most recently active first.
+
+## `GET /api/chat/admin/conversations/:conversationId/messages`
+
+Admin view of any conversation's full message history.
+
+## `GET /api/chat/admin/escalations?installationId=...&status=...`
+
+Lists escalation tickets.
+
+## `PATCH /api/chat/admin/escalations/:ticketId`
+
+Body: `{ status: "OPEN" | "ACKNOWLEDGED" | "RESOLVED" | "CANCELLED" }`.
+
+## `GET /api/chat/admin/analytics?installationId=...&sinceDays=...`
+
+Conversation Analytics — `{ totalConversations, averageResponseTimeMs,
+averageConversationLengthMessages, resolvedConversations,
+escalatedConversations, userSatisfaction: { likes, dislikes, ratio },
+topQuestions, failedQuestions, knowledgeCoverage }`. Omit `sinceDays` for
+an all-time report. See CHAT_ENGINE.md for what `knowledgeCoverage`
+actually measures (there's no ground-truth label for a true "AI Accuracy"
+metric).
+
+---
+
+# Phase 10 — Automatic Website Update Engine API
+
+See [docs/AUTO_UPDATE_ENGINE.md](AUTO_UPDATE_ENGINE.md) for the full
+design. `monitor.routes.ts`'s routes keep the same `x-api-key: <API_SECRET>`
++ rate-limit gate as `knowledgeRouter`/`trainingRouter`.
+`monitorWebhook.routes.ts`'s two routes are deliberately public-reachable
+and gate on HMAC/shared-secret verification instead (a webhook caller has
+no way to hold an internal API key).
+
+## `POST /api/monitor/webhook/scan`
+
+No `x-api-key`. Headers: `X-KVL-Signature: <hex HMAC-SHA256 of the raw
+request body, keyed by WEBHOOK_SECRET>`. Body: `{ websiteUrl?, maxDepth?,
+maxPages?, concurrency? }` — `websiteUrl` defaults to the active
+installation's own website when omitted. Triggers an immediate rescan via
+the same `runWebsiteScan` pipeline `POST /api/scan/start` uses. Responds
+`202` with `{ started: true, jobId, websiteUrl }` immediately; a missing
+or invalid signature is a `401` before any body parsing/DB lookup happens.
+
+## `GET /api/monitor/webhook/scan/:jobId`
+
+No `x-api-key`. Header: `X-KVL-Secret: <WEBHOOK_SECRET>` (constant-time
+compared). Polls the `BackgroundJob` row created by the trigger above —
+`{ id, status, lastError, completedAt }`.
+
+## `GET /api/monitor/reports?installationId=...`
+
+Chronological list of `KnowledgeComparisonReport` summaries
+(`{ crawlJobId, previousCrawlJobId, generatedAt }`) for an installation.
+`installationId` optional — defaults to the active installation.
+
+## `GET /api/monitor/reports/:crawlJobId`
+
+The full persisted `KnowledgeComparisonReportData` for one training run —
+page/chunk/entity/metadata changes and the category breakdown. `404` if
+no report was generated for that crawl job.
+
+## `GET /api/monitor/notifications?installationId=...`
+
+Most-recent-first `Notification` list (up to 50):
+`{ id, type, severity, title, message, readAt, createdAt }`.
+
+## `POST /api/monitor/notifications/:id/read`
+
+Marks one notification read (`readAt` set to now).
+
+## `GET /api/monitor/notification-settings?installationId=...`
+
+Current per-installation channel configuration, or `null` if never
+configured (Dashboard/Log still apply by default in that case — see
+`notificationEngine.ts`'s `determineChannels`).
+
+## `PUT /api/monitor/notification-settings`
+
+Body: `{ installationId, emailEnabled?, emailAddress?, webhookEnabled?,
+webhookUrl?, enabledEmailTypes?, enabledWebhookTypes? }`. Upserts.
+`enabledEmailTypes`/`enabledWebhookTypes` empty (or omitted on first
+creation) means "all notification types enabled" for that channel.
+
+## `GET /api/monitor/jobs?installationId=...`
+
+Most-recent-first `BackgroundJob` history (up to 50):
+`{ id, type, status, payload, lastError, startedAt, completedAt, createdAt }`.
+
+## `GET /api/monitor/schedules?installationId=...`
+
+List of `ScanSchedule` rows for an installation.
+
+## `POST /api/monitor/schedules`
+
+Body: `{ installationId, crawlJobId, label?, preset }` (one of `"hourly"
+| "daily" | "weekly" | "monthly"`) **or** `{ installationId, crawlJobId,
+label?, cronExpression }` (a raw 5-field cron expression, validated before
+saving). `crawlJobId` is an existing completed crawl job whose
+website+options get replayed on every fire. Registers immediately with
+the in-process `CronRuntime` in addition to persisting the row.
+
+## `PATCH /api/monitor/schedules/:id`
+
+Body: `{ enabled }`. Enables/disables a schedule — enabling re-registers
+it with `CronRuntime`; disabling unregisters it (the row itself is kept,
+not deleted).
+
+## `DELETE /api/monitor/schedules/:id`
+
+Unregisters from `CronRuntime` and deletes the row.
+
+## `POST /api/knowledge/rollback/training-run`
+
+Body: `{ crawlJobId }`. Rolls back every chunk that training run touched
+in one operation — see AUTO_UPDATE_ENGINE.md's "Training-run-level
+Rollback" for the restore-vs-delete decision and its scoping limitation.
+Response: `{ crawlJobId, installationId, chunksRestored, chunksDeleted,
+vectorCount }`. Lives under the existing `knowledgeRouter`
+(`x-api-key` gate), alongside the pre-existing per-chunk
+`POST /api/knowledge/rollback`.
+
+---
+
+# Phase 11 — Enterprise Production Deployment System API
+
+See [docs/DEPLOYMENT.md](DEPLOYMENT.md) for the full design. `GET
+/api/deployment/health` and `GET /api/deployment/version` are
+unauthenticated (a liveness/status probe has no internal-API-key holder
+by definition); every other route below sits behind the same `x-api-key:
+<API_SECRET>` + rate-limit gate as `knowledgeRouter`/`trainingRouter`/
+`monitorRouter`. Also not covered by this section: `GET /metrics`
+(Prometheus format, top-level, outside `/api` — see DEPLOYMENT.md's
+"Monitoring" section for why it's unauthenticated but never
+internet-reachable).
+
+## `GET /api/deployment/health`
+
+No `x-api-key`. The full Health Check Engine report:
+`{ status: "pass"|"warn"|"fail", checkedAt, items: [{ id, label, status,
+detail, durationMs }, ...] }` across 12 dimensions (backend, frontend,
+database, redis, vector_index, storage, ssl, internet, ai_engine, scanner,
+knowledge_base, connectors). Responds `503` when `status` is `"fail"`,
+`200` otherwise — safe to use as a richer alternative to `GET /health` for
+anything that can tolerate a slightly slower, more detailed check.
+
+## `GET /api/deployment/version`
+
+No `x-api-key`. `{ version, nodeVersion, nodeEnv, startedAt }` —
+`version` is `backend/package.json`'s own version field.
+
+## `GET /api/deployment/backups`
+
+List of `BackupRecord` rows for the active installation, most recent
+first. `sizeBytes` is returned as a string (BigInt doesn't serialize to
+JSON natively).
+
+## `POST /api/deployment/backups`
+
+Body: `{ label? }`. Runs a manual backup **synchronously** (can take
+several minutes) and returns the result once it's actually done —
+deliberately not a fire-and-forget "started" response, since a caller
+triggering a backup before a risky operation needs to know it genuinely
+succeeded first.
+
+## `POST /api/deployment/backups/prune`
+
+Applies `BACKUP_RETENTION_DAYS` immediately rather than waiting for the
+next scheduled backup. Returns `{ pruned: <count> }`.
+
+## `GET /api/deployment/restore/available`
+
+Read-only list of completed backups available to restore from. Actually
+performing a restore is a host-level operation
+(`deploy/scripts/restore.sh`) — see DEPLOYMENT.md's "Restore Manager" for
+why this API deliberately doesn't trigger one itself.
+
+## `GET /api/deployment/plugins`
+
+List of registered `Plugin` rows for the active installation.
+
+## `GET /api/deployment/plugins/discover`
+
+Every subdirectory of `plugins/` that has a `plugin.json`, regardless of
+whether it's already installed — candidates for the install call below.
+
+## `POST /api/deployment/plugins/install`
+
+Body: `{ pluginDirName }`. Validates the manifest, registers (or
+re-registers, on upgrade) the plugin. Always installs **disabled**.
+
+## `POST /api/deployment/plugins/:id/enable` / `POST /api/deployment/plugins/:id/disable`
+
+Toggles a plugin's status. Enabling re-validates the on-disk manifest/entry
+point first and fails (leaving the plugin in `ERROR` status) if either has
+drifted since install.
+
+## `GET /api/deployment/plugins/:id/health`
+
+Re-validates without changing enabled/disabled state — surfaces drift as
+an `ERROR` status rather than leaving a stale `ENABLED` that would fail if
+actually loaded.
+
+## `DELETE /api/deployment/plugins/:id`
+
+Removes the plugin's *registration* only — does not delete its on-disk
+directory (see DEPLOYMENT.md's "Plugin Management" for why).
+
+## `GET /api/deployment/license`
+
+Current `License` row for the active installation, or `null` if never
+activated.
+
+## `POST /api/deployment/license/activate`
+
+Body: `{ licenseFileContent }` — the raw JSON text of a signed license
+file. `422` with a detail message on rejection (invalid signature,
+expired, wrong machine).
+
+## `POST /api/deployment/license/validate`
+
+Re-checks the currently activated license (signature, expiry, machine
+fingerprint) and updates its stored status accordingly. Returns
+`{ verdict, license }`.

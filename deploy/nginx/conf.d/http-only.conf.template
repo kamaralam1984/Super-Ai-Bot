@@ -1,0 +1,36 @@
+# HTTP-only server block — active when no domain/TLS certificate is
+# configured yet (a fresh install, or a deliberate IP-only/internal
+# deployment with TLS terminated elsewhere, e.g. behind a corporate LB).
+# deploy/scripts/install.sh installs this as conf.d/kvl.conf when
+# DOMAIN is unset; deploy/scripts/ssl-init.sh replaces it with
+# https.conf.template once a real certificate has been issued.
+#
+# Still serves the ACME HTTP-01 challenge path so ssl-init.sh can request
+# a first certificate without nginx needing to restart into a different
+# mode first.
+
+upstream kvl_backend {
+    server backend:4500 max_fails=3 fail_timeout=30s;
+    # A second `server` line here is all a future horizontally-scaled
+    # deployment needs for load balancing — see docs/DEPLOYMENT.md's
+    # "Load balancing" section.
+    keepalive 32;
+}
+
+upstream kvl_frontend {
+    server frontend:8080 max_fails=3 fail_timeout=30s;
+    keepalive 16;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${DOMAIN_OR_UNDERSCORE};
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        try_files $uri =404;
+    }
+
+    include /etc/nginx/conf.d/kvl-locations.conf;
+}

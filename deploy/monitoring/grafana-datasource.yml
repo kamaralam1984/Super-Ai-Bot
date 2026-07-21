@@ -1,0 +1,19 @@
+# Auto-provisions Prometheus as a Grafana datasource on first boot — no
+# manual "add datasource" click-through needed. Dashboards are not
+# pre-provisioned here: Grafana's own official Node.js Application
+# dashboard (grafana.com/grafana/dashboards/11159) covers the
+# prom-client default metrics this backend exports out of the box: import
+# it via Grafana's UI (Dashboards -> Import -> ID 11159) once this
+# overlay is running, or build a custom one from the `kvl_http_*` /
+# `kvl_process_*` / `kvl_nodejs_*` series. Shipping a fabricated,
+# never-visually-verified custom dashboard JSON here would be worse than
+# pointing at the real, maintained one.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true
