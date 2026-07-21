@@ -58,6 +58,13 @@ COPY package.json package-lock.json ./
 COPY backend/package.json ./backend/package.json
 COPY shared/package.json ./shared/package.json
 COPY frontend/package.json ./frontend/package.json
+# Only the manifest was copied above (for npm ci's layer caching) — but
+# `prisma generate` below needs the actual schema file, which lives
+# under backend/prisma/, not in package.json. Without this, this stage
+# fails with "Could not load `--schema` from provided path
+# `backend/prisma/schema.prisma`: file or directory not found", since
+# nothing had put that file there yet.
+COPY backend/prisma ./backend/prisma
 
 # npm ci resolves the lockfile against every workspace declared in the
 # root package.json, so frontend's manifest must be present even though
