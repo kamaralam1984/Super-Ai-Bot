@@ -127,9 +127,15 @@ RUN groupadd --gid 10001 kvl \
 
 WORKDIR /app
 
+# npm workspaces hoists every dependency (backend's and shared's alike)
+# into the single root node_modules/ unless a version conflict forces a
+# nested copy — neither workspace here has one, so backend/node_modules
+# and shared/node_modules never actually exist in the `deps` stage, and
+# copying them failed the build outright ("not found"). Node's own
+# module resolution already walks up from /app/backend (this stage's
+# eventual WORKDIR) to /app/node_modules, so the one root copy below is
+# both correct and sufficient.
 COPY --from=deps /app/node_modules ./node_modules
-COPY --from=deps /app/backend/node_modules ./backend/node_modules
-COPY --from=deps /app/shared/node_modules ./shared/node_modules
 COPY --from=builder /app/shared/dist ./shared/dist
 COPY --from=builder /app/shared/package.json ./shared/package.json
 COPY --from=builder /app/backend/dist ./backend/dist
