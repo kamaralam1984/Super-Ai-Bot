@@ -158,6 +158,14 @@ services:
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      # kvl-locations.conf/kvl-proxy-headers.conf live here (not conf.d/)
+      # specifically so nginx.conf's `include conf.d/*.conf` wildcard
+      # never picks them up directly — they're include-only snippets
+      # meant to be reached solely via the explicit `include` inside
+      # kvl.conf's own server block; the wildcard doing so anyway put
+      # `location` directives outside any server block, a hard startup
+      # failure ("location directive is not allowed here").
+      - ./nginx/includes:/etc/nginx/includes:ro
       - certbot_webroot:/var/www/certbot:ro
       - certbot_certs:/etc/letsencrypt:ro
     environment:

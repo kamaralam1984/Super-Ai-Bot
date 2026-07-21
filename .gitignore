@@ -33,6 +33,12 @@ logs/*.log
 # watch` dev and the Docker image's WORKDIR) rather than at the repo
 # root — anchoring /storage/ above doesn't catch this one.
 backend/storage/
+
+# install.sh's Step 6 generates this fresh from a .template on every
+# install, baking in the real --domain value — instance-specific, not
+# source.
+/deploy/nginx/conf.d/kvl.conf
+
 *.tsbuildinfo
 .DS_Store
 coverage/
