@@ -141,6 +141,12 @@ COPY --from=builder /app/shared/package.json ./shared/package.json
 COPY --from=builder /app/backend/dist ./backend/dist
 COPY --from=builder /app/backend/prisma ./backend/prisma
 COPY --from=builder /app/backend/package.json ./backend/package.json
+# widget.routes.ts reads widget.js/widget.html straight from src/ at
+# request time (not compiled — they're plain static assets, see that
+# file's own comment on why), in both `tsx watch` dev and this Docker
+# image. Without this copy, only backend/dist exists in the runtime
+# image and the process crashes on its very first request with ENOENT.
+COPY --from=builder /app/backend/src/widget ./backend/src/widget
 COPY package.json ./package.json
 
 # Every RUNTIME_DIRECTORIES entry (backend/src/config/paths.ts) as a
