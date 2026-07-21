@@ -162,9 +162,19 @@ log "Docker Compose: $(docker compose version)"
 
 # ── Step 3: application user ────────────────────────────────────────────────
 log "Step 3/9: creating application user '$APP_USER'..."
+# Explicit --uid/--gid 10001 to match backend.Dockerfile's container-side
+# `kvl` user exactly. Without this, useradd assigns the next arbitrary
+# free system UID (e.g. 998) — a *different* number from the container's
+# hardcoded 10001, and since bind-mounted files (.env, the generated
+# nginx vhost, etc.) are permission-checked by raw UID rather than
+# username, the container's own process can create/own directories fine
+# but can never write back to a host-created file like .env (real
+# failure: dockerInstallFinalize.js's "EACCES: permission denied, open
+# '/app/.env'" trying to record website-name/url after finalizing).
 if ! id "$APP_USER" >/dev/null 2>&1; then
-  useradd --system --create-home --shell /usr/sbin/nologin "$APP_USER"
-  log "Created system user '$APP_USER'."
+  groupadd --gid 10001 "$APP_USER" 2>/dev/null || true
+  useradd --uid 10001 --gid 10001 --system --create-home --shell /usr/sbin/nologin "$APP_USER"
+  log "Created system user '$APP_USER' (uid/gid 10001, matching the container)."
 else
   log "User '$APP_USER' already exists."
 fi
