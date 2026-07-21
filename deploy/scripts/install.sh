@@ -229,10 +229,15 @@ DB_PASSWORD=$DB_PASSWORD
 DB_NAME=$DB_NAME
 REDIS_PASSWORD=$REDIS_PASSWORD
 
-DOMAIN=$DOMAIN
-LETSENCRYPT_EMAIL=$EMAIL
+DOMAIN="$DOMAIN"
+LETSENCRYPT_EMAIL="$EMAIL"
 
-BACKUP_SCHEDULE_CRON=0 3 * * *
+# Unquoted, this cron expression's spaces and `*` glob characters make
+# `source .env`/`set -a; . .env` (this script's own next step, and any
+# admin later sourcing the file to debug) try to run `3`, `*`, `*`, `*`
+# as separate commands — breaks every time, deterministically, since a
+# cron schedule is never going to NOT have spaces and asterisks.
+BACKUP_SCHEDULE_CRON="0 3 * * *"
 BACKUP_RETENTION_DAYS=14
 
 # Only used if the optional monitoring overlay is enabled later — see
