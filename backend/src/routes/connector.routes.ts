@@ -15,6 +15,7 @@ import { PermissionOrchestratorService } from "../permission/permissionOrchestra
 import { verifyApiKey, TokenBucketRateLimiter } from "../knowledge/security/accessControl";
 import { recordAuditEvent } from "../knowledge/security/auditLog";
 import { getSocketServer } from "../ws/socket";
+import { resolveInstallationId } from "../middleware/tenantContext";
 import { AppError } from "../middleware/errorHandler";
 import { logEvent } from "../utils/logger";
 import { formatError } from "../utils/formatError";
@@ -88,7 +89,7 @@ const startBodySchema = z.object({
 });
 
 /** Kicks off connector recommendation → auth → discovery → validation → health check and returns immediately — progress streams over the caller's Socket.IO room, mirroring /api/techdetect/start. */
-connectorRouter.post("/start", (req, res, next) => {
+connectorRouter.post("/start", async (req, res, next) => {
   try {
     const parsed = startBodySchema.safeParse(req.body);
     if (!parsed.success) {
@@ -97,6 +98,7 @@ connectorRouter.post("/start", (req, res, next) => {
     const databaseUrl = requireDatabaseUrl();
     const io = getSocketServer();
     const { socketId, ...setupParams } = parsed.data;
+    setupParams.installationId = await resolveInstallationId(req, databaseUrl, setupParams.installationId);
 
     runConnectorSetup(databaseUrl, setupParams as ConnectorSetupParams, (event) => {
       io.to(socketId).emit("connector:progress", event);
@@ -121,19 +123,19 @@ connectorRouter.post("/start", (req, res, next) => {
 
 /** Lists every connector configured for an installation. */
 connectorRouter.get("/", async (req, res, next) => {
-  const installationId = typeof req.query.installationId === "string" ? req.query.installationId : undefined;
-  if (!installationId) {
-    next(new AppError(400, "installationId query parameter is required", "Pass ?installationId=... .", true));
-    return;
-  }
-  const records = new ConnectorRecordService(requireDatabaseUrl());
   try {
-    const connectors = await records.listConnectors(installationId);
-    res.json({ success: true, data: connectors });
+    const clientSupplied = typeof req.query.installationId === "string" ? req.query.installationId : undefined;
+    const databaseUrl = requireDatabaseUrl();
+    const installationId = await resolveInstallationId(req, databaseUrl, clientSupplied);
+    const records = new ConnectorRecordService(databaseUrl);
+    try {
+      const connectors = await records.listConnectors(installationId);
+      res.json({ success: true, data: connectors });
+    } finally {
+      await records.close();
+    }
   } catch (err) {
     next(err);
-  } finally {
-    await records.close();
   }
 });
 
@@ -420,9 +422,11 @@ connectorRouter.post("/tools/search-knowledge", async (req, res, next) => {
     next(new AppError(400, "Invalid request body", parsed.error.issues.map((i) => i.message).join("; "), true));
     return;
   }
-  const permissions = new PermissionOrchestratorService(requireDatabaseUrl());
+  const databaseUrl = requireDatabaseUrl();
+  const permissions = new PermissionOrchestratorService(databaseUrl);
   try {
-    const result = await aiTools.searchKnowledge(permissions, parsed.data.installationId, requireDatabaseUrl(), parsed.data);
+    const installationId = await resolveInstallationId(req, databaseUrl, parsed.data.installationId);
+    const result = await aiTools.searchKnowledge(permissions, installationId, databaseUrl, parsed.data);
     res.json({ success: result.ok, data: result });
   } catch (err) {
     next(err);

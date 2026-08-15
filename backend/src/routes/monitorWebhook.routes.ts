@@ -2,7 +2,7 @@ import { Router } from "express";
 import crypto from "node:crypto";
 import { z } from "zod";
 import { runWebsiteScan } from "../scanner/scanOrchestrator.service";
-import { getActiveInstallationId } from "../scanner/scanRecord.service";
+import { resolveInstallationId } from "../middleware/tenantContext";
 import { verifyWebhookSignature } from "../monitor/notify/webhookChannel";
 import { MonitorRecordService } from "../monitor/monitorRecord.service";
 import { AppError } from "../middleware/errorHandler";
@@ -13,6 +13,16 @@ export const monitorWebhookRouter = Router();
 
 const bodySchema = z.object({
   websiteUrl: z.string().url().optional(),
+  // No session on a server-to-server webhook call, so — unlike every
+  // other converted route — there's no tenant context to fall back from;
+  // a caller must know both this deployment's WEBHOOK_SECRET *and* the
+  // target installationId. WEBHOOK_SECRET is shared across the whole
+  // deployment, not per-tenant, so this is a known, accepted scope gap
+  // for multi-tenant use of this specific feature (a genuine per-tenant
+  // webhook secret is a real follow-up, not attempted here) — no worse
+  // than before this conversion, where only the legacy installation
+  // could ever be targeted at all.
+  installationId: z.string().min(1).optional(),
   maxDepth: z.number().int().min(1).max(10).optional(),
   maxPages: z.number().int().min(1).max(2000).optional(),
   concurrency: z.number().int().min(1).max(20).optional(),
@@ -51,13 +61,10 @@ monitorWebhookRouter.post("/webhook/scan", async (req, res, next) => {
     if (!databaseUrl) {
       throw new AppError(400, "No database configured", "Complete the installer (Phase 1) before triggering a scan.", true);
     }
-    const installationId = await getActiveInstallationId(databaseUrl);
-    if (!installationId) {
-      throw new AppError(400, "No completed installation found", "Complete the installer (Phase 1) before triggering a scan.", true);
-    }
+    const installationId = await resolveInstallationId(req, databaseUrl, parsed.data.installationId);
 
     const records = new MonitorRecordService(databaseUrl);
-    const { websiteUrl: overrideUrl, ...scanOptions } = parsed.data;
+    const { websiteUrl: overrideUrl, installationId: _ignored, ...scanOptions } = parsed.data;
     const websiteUrl = overrideUrl ?? (await records.getInstallationWebsiteUrl(installationId));
     if (!websiteUrl) {
       await records.close();

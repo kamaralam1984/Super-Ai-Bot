@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { runWebsiteScan } from "../scanner/scanOrchestrator.service";
-import { getActiveInstallationId } from "../scanner/scanRecord.service";
+import { resolveInstallationId } from "../middleware/tenantContext";
 import { getSocketServer } from "../ws/socket";
 import { AppError } from "../middleware/errorHandler";
 import { logEvent } from "../utils/logger";
@@ -12,6 +12,7 @@ export const scanRouter = Router();
 const bodySchema = z.object({
   websiteUrl: z.string().url(),
   socketId: z.string().min(1),
+  installationId: z.string().min(1).optional(),
   maxDepth: z.number().int().min(1).max(10).optional(),
   maxPages: z.number().int().min(1).max(2000).optional(),
   concurrency: z.number().int().min(1).max(20).optional(),
@@ -34,13 +35,10 @@ scanRouter.post("/start", async (req, res, next) => {
     if (!databaseUrl) {
       throw new AppError(400, "No database configured", "Complete the installer (Phase 1) before running a website scan.", true);
     }
-    const installationId = await getActiveInstallationId(databaseUrl);
-    if (!installationId) {
-      throw new AppError(400, "No completed installation found", "Complete the installer (Phase 1) before running a website scan.", true);
-    }
+    const installationId = await resolveInstallationId(req, databaseUrl, parsed.data.installationId);
 
     const io = getSocketServer();
-    const { socketId, websiteUrl, ...scanOptions } = parsed.data;
+    const { socketId, websiteUrl, installationId: _ignored, ...scanOptions } = parsed.data;
 
     runWebsiteScan(databaseUrl, installationId, websiteUrl, scanOptions, (event) => {
       io.to(socketId).emit("scan:progress", event);

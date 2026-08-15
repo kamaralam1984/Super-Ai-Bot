@@ -26,6 +26,7 @@ import { ChatRecordService } from "../chat/chatRecord.service";
 import { computeConversationAnalytics } from "../chat/analytics/conversationAnalytics";
 import { isShareTokenValid } from "../chat/session/sessionManager";
 import { getActiveInstallationId } from "../scanner/scanRecord.service";
+import { resolveInstallationId } from "../middleware/tenantContext";
 import { verifyApiKey, TokenBucketRateLimiter } from "../knowledge/security/accessControl";
 import { recordAuditEvent } from "../knowledge/security/auditLog";
 import { AppError } from "../middleware/errorHandler";
@@ -42,25 +43,38 @@ function requireDatabaseUrl(): string {
 
 /**
  * Public bootstrap for the embeddable widget (backend/src/routes/widget.routes.ts).
- * This product is single-tenant per deployment — one server, one
- * installation — so the widget's script tag carries no config of its own;
- * it just calls this once on load to learn which installation and
- * business name to use for every subsequent /api/chat/* call. No auth, for
- * the same reason the rest of this router has none: it runs from an
- * anonymous visitor's browser on a third-party site.
+ * It calls this once on load to learn which installation and business
+ * name to use for every subsequent /api/chat/* call. No auth, for the
+ * same reason the rest of this router has none: it runs from an anonymous
+ * visitor's browser on a third-party site.
+ *
+ * `?installationId=` (optional) is a tenant's *public* Installation.installationId
+ * string (widget.js reads it from the script tag's data-installation-id
+ * attribute — see widget.html) — deliberately not a secret, the same way
+ * this endpoint's own response already is public. When present, it
+ * resolves that specific tenant's installation; when absent, it falls
+ * back to the legacy accountId:null installation exactly as before, so
+ * KVL's own existing embed (no query param) is unaffected.
  */
-chatRouter.get("/config", async (_req, res, next) => {
+chatRouter.get("/config", async (req, res, next) => {
   try {
     const databaseUrl = requireDatabaseUrl();
-    const installationId = await getActiveInstallationId(databaseUrl);
-    if (!installationId) {
-      next(new AppError(404, "No completed installation yet", "Finish the installer before embedding the chat widget.", true));
-      return;
-    }
+    const publicInstallationId = typeof req.query.installationId === "string" ? req.query.installationId : undefined;
+
     const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
     try {
-      const installation = await prisma.installation.findUnique({ where: { id: installationId } });
-      res.json({ success: true, data: { installationId, businessName: installation?.websiteName ?? "our team" } });
+      const installation = publicInstallationId
+        ? await prisma.installation.findFirst({ where: { installationId: publicInstallationId, status: "COMPLETED" } })
+        : await (async () => {
+            const legacyRowId = await getActiveInstallationId(databaseUrl);
+            return legacyRowId ? prisma.installation.findUnique({ where: { id: legacyRowId } }) : null;
+          })();
+
+      if (!installation) {
+        next(new AppError(404, "No completed installation yet", "Finish the installer before embedding the chat widget.", true));
+        return;
+      }
+      res.json({ success: true, data: { installationId: installation.id, businessName: installation.websiteName } });
     } finally {
       await prisma.$disconnect();
     }
@@ -251,20 +265,19 @@ adminRouter.use((req, res, next) => {
 });
 
 adminRouter.get("/conversations", async (req, res, next) => {
-  const installationId = typeof req.query.installationId === "string" ? req.query.installationId : undefined;
-  if (!installationId) {
-    next(new AppError(400, "installationId query parameter is required", "Pass ?installationId=... .", true));
-    return;
-  }
-  const status = typeof req.query.status === "string" ? (req.query.status as "ACTIVE" | "IDLE" | "ESCALATED" | "CLOSED") : undefined;
-  const records = new ChatRecordService(requireDatabaseUrl());
   try {
-    const conversations = await records.listConversations(installationId, { status });
-    res.json({ success: true, data: conversations });
+    const clientSupplied = typeof req.query.installationId === "string" ? req.query.installationId : undefined;
+    const installationId = await resolveInstallationId(req, requireDatabaseUrl(), clientSupplied);
+    const status = typeof req.query.status === "string" ? (req.query.status as "ACTIVE" | "IDLE" | "ESCALATED" | "CLOSED") : undefined;
+    const records = new ChatRecordService(requireDatabaseUrl());
+    try {
+      const conversations = await records.listConversations(installationId, { status });
+      res.json({ success: true, data: conversations });
+    } finally {
+      await records.close();
+    }
   } catch (err) {
     next(err);
-  } finally {
-    await records.close();
   }
 });
 
@@ -281,20 +294,19 @@ adminRouter.get("/conversations/:conversationId/messages", async (req, res, next
 });
 
 adminRouter.get("/escalations", async (req, res, next) => {
-  const installationId = typeof req.query.installationId === "string" ? req.query.installationId : undefined;
-  if (!installationId) {
-    next(new AppError(400, "installationId query parameter is required", "Pass ?installationId=... .", true));
-    return;
-  }
-  const status = typeof req.query.status === "string" ? (req.query.status as "OPEN" | "ACKNOWLEDGED" | "RESOLVED" | "CANCELLED") : undefined;
-  const records = new ChatRecordService(requireDatabaseUrl());
   try {
-    const tickets = await records.listEscalationTickets(installationId, { status });
-    res.json({ success: true, data: tickets });
+    const clientSupplied = typeof req.query.installationId === "string" ? req.query.installationId : undefined;
+    const installationId = await resolveInstallationId(req, requireDatabaseUrl(), clientSupplied);
+    const status = typeof req.query.status === "string" ? (req.query.status as "OPEN" | "ACKNOWLEDGED" | "RESOLVED" | "CANCELLED") : undefined;
+    const records = new ChatRecordService(requireDatabaseUrl());
+    try {
+      const tickets = await records.listEscalationTickets(installationId, { status });
+      res.json({ success: true, data: tickets });
+    } finally {
+      await records.close();
+    }
   } catch (err) {
     next(err);
-  } finally {
-    await records.close();
   }
 });
 
@@ -319,27 +331,26 @@ adminRouter.patch("/escalations/:ticketId", async (req, res, next) => {
 
 /** Conversation Analytics — see chat/analytics/conversationAnalytics.ts for what's computed and honest documentation of what "AI Accuracy"/"Knowledge Coverage" actually measure here. `?sinceDays=` narrows the window; omit for all-time. */
 adminRouter.get("/analytics", async (req, res, next) => {
-  const installationId = typeof req.query.installationId === "string" ? req.query.installationId : undefined;
-  if (!installationId) {
-    next(new AppError(400, "installationId query parameter is required", "Pass ?installationId=... .", true));
-    return;
-  }
-  const sinceDays = typeof req.query.sinceDays === "string" ? Number(req.query.sinceDays) : undefined;
-  const since = sinceDays && Number.isFinite(sinceDays) ? new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000) : undefined;
-
-  const records = new ChatRecordService(requireDatabaseUrl());
   try {
-    const [conversations, messages, escalations] = await Promise.all([
-      records.getConversationSummaries(installationId, since),
-      records.getMessageSummaries(installationId, since),
-      records.getEscalationSummaries(installationId, since),
-    ]);
-    const report = computeConversationAnalytics({ conversations, messages, escalations });
-    res.json({ success: true, data: report });
+    const clientSupplied = typeof req.query.installationId === "string" ? req.query.installationId : undefined;
+    const installationId = await resolveInstallationId(req, requireDatabaseUrl(), clientSupplied);
+    const sinceDays = typeof req.query.sinceDays === "string" ? Number(req.query.sinceDays) : undefined;
+    const since = sinceDays && Number.isFinite(sinceDays) ? new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000) : undefined;
+
+    const records = new ChatRecordService(requireDatabaseUrl());
+    try {
+      const [conversations, messages, escalations] = await Promise.all([
+        records.getConversationSummaries(installationId, since),
+        records.getMessageSummaries(installationId, since),
+        records.getEscalationSummaries(installationId, since),
+      ]);
+      const report = computeConversationAnalytics({ conversations, messages, escalations });
+      res.json({ success: true, data: report });
+    } finally {
+      await records.close();
+    }
   } catch (err) {
     next(err);
-  } finally {
-    await records.close();
   }
 });
 

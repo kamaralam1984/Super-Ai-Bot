@@ -3,7 +3,7 @@ import { z } from "zod";
 import { MonitorRecordService } from "../monitor/monitorRecord.service";
 import { getScheduleRuntime } from "../monitor/monitorOrchestrator.service";
 import { validateCronExpression, presetToCronExpression, type SchedulePreset } from "../monitor/schedule/cronScheduler";
-import { getActiveInstallationId } from "../scanner/scanRecord.service";
+import { resolveInstallationId } from "../middleware/tenantContext";
 import { verifyApiKey, TokenBucketRateLimiter } from "../knowledge/security/accessControl";
 import { recordAuditEvent } from "../knowledge/security/auditLog";
 import { AppError } from "../middleware/errorHandler";
@@ -37,21 +37,13 @@ function requireDatabaseUrl(): string {
   return databaseUrl;
 }
 
-async function resolveInstallationId(databaseUrl: string, req: { query: Record<string, unknown> }): Promise<string> {
-  const fromQuery = typeof req.query.installationId === "string" ? req.query.installationId : undefined;
-  if (fromQuery) return fromQuery;
-  const active = await getActiveInstallationId(databaseUrl);
-  if (!active) throw new AppError(400, "No completed installation found", "Complete the installer (Phase 1) first.", true);
-  return active;
-}
-
 // ── Knowledge Comparison Reports ─────────────────────────────────────────
 
 monitorRouter.get("/reports", async (req, res, next) => {
   const databaseUrl = requireDatabaseUrl();
   const records = new MonitorRecordService(databaseUrl);
   try {
-    const installationId = await resolveInstallationId(databaseUrl, req);
+    const installationId = await resolveInstallationId(req, databaseUrl, typeof req.query.installationId === "string" ? req.query.installationId : undefined);
     const reports = await records.listComparisonReports(installationId);
     res.json({ success: true, data: reports });
   } catch (err) {
@@ -81,7 +73,7 @@ monitorRouter.get("/notifications", async (req, res, next) => {
   const databaseUrl = requireDatabaseUrl();
   const records = new MonitorRecordService(databaseUrl);
   try {
-    const installationId = await resolveInstallationId(databaseUrl, req);
+    const installationId = await resolveInstallationId(req, databaseUrl, typeof req.query.installationId === "string" ? req.query.installationId : undefined);
     const notifications = await records.listNotifications(installationId);
     res.json({ success: true, data: notifications });
   } catch (err) {
@@ -118,7 +110,7 @@ monitorRouter.get("/notification-settings", async (req, res, next) => {
   const databaseUrl = requireDatabaseUrl();
   const records = new MonitorRecordService(databaseUrl);
   try {
-    const installationId = await resolveInstallationId(databaseUrl, req);
+    const installationId = await resolveInstallationId(req, databaseUrl, typeof req.query.installationId === "string" ? req.query.installationId : undefined);
     const settings = await records.getNotificationSettings(installationId);
     res.json({ success: true, data: settings });
   } catch (err) {
@@ -134,7 +126,8 @@ monitorRouter.put("/notification-settings", async (req, res, next) => {
   try {
     const parsed = notificationSettingsSchema.safeParse(req.body);
     if (!parsed.success) throw new AppError(400, "Invalid request body", parsed.error.issues.map((i) => i.message).join("; "), true);
-    const { installationId, ...settings } = parsed.data;
+    const { installationId: bodyInstallationId, ...settings } = parsed.data;
+    const installationId = await resolveInstallationId(req, databaseUrl, bodyInstallationId);
     await records.upsertNotificationSettings(installationId, settings);
     res.json({ success: true, data: { installationId } });
   } catch (err) {
@@ -150,7 +143,7 @@ monitorRouter.get("/jobs", async (req, res, next) => {
   const databaseUrl = requireDatabaseUrl();
   const records = new MonitorRecordService(databaseUrl);
   try {
-    const installationId = await resolveInstallationId(databaseUrl, req);
+    const installationId = await resolveInstallationId(req, databaseUrl, typeof req.query.installationId === "string" ? req.query.installationId : undefined);
     const jobs = await records.listBackgroundJobs(installationId);
     res.json({ success: true, data: jobs });
   } catch (err) {
@@ -166,7 +159,7 @@ monitorRouter.get("/schedules", async (req, res, next) => {
   const databaseUrl = requireDatabaseUrl();
   const records = new MonitorRecordService(databaseUrl);
   try {
-    const installationId = await resolveInstallationId(databaseUrl, req);
+    const installationId = await resolveInstallationId(req, databaseUrl, typeof req.query.installationId === "string" ? req.query.installationId : undefined);
     const schedules = await records.listScanSchedules(installationId);
     res.json({ success: true, data: schedules });
   } catch (err) {
@@ -192,12 +185,13 @@ monitorRouter.post("/schedules", async (req, res, next) => {
     const parsed = createScheduleSchema.safeParse(req.body);
     if (!parsed.success) throw new AppError(400, "Invalid request body", parsed.error.issues.map((i) => i.message).join("; "), true);
     const data = parsed.data as { installationId: string; crawlJobId: string; label?: string } & ({ preset: SchedulePreset } | { cronExpression: string });
+    const installationId = await resolveInstallationId(req, databaseUrl, data.installationId);
 
     const cronExpression = "preset" in data ? presetToCronExpression(data.preset) : data.cronExpression;
     const validation = validateCronExpression(cronExpression);
     if (!validation.valid) throw new AppError(400, "Invalid cron expression", validation.errorMessage, true);
 
-    const scheduleId = await records.createScanSchedule(data.installationId, data.crawlJobId, cronExpression, data.label ?? null);
+    const scheduleId = await records.createScanSchedule(installationId, data.crawlJobId, cronExpression, data.label ?? null);
     getScheduleRuntime().register(scheduleId, cronExpression);
     recordAuditEvent({ type: "training_schedule_created", detail: `scheduleId=${scheduleId} cron=${cronExpression} crawlJobId=${data.crawlJobId}`, component: "monitor-security" });
 

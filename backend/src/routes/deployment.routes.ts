@@ -5,7 +5,7 @@ import { getVersionInfo } from "../deployment/update/updateStatus.service";
 import { runBackup, listBackups, pruneOldBackups } from "../deployment/backup/backupService";
 import { discoverPluginDirectories, installPlugin, enablePlugin, disablePlugin, removePlugin, checkPluginHealth, listPlugins } from "../deployment/plugins/pluginService";
 import { activateLicense, validateLicense, getLicenseStatus } from "../deployment/license/licenseService";
-import { getActiveInstallationId } from "../scanner/scanRecord.service";
+import { resolveInstallationId } from "../middleware/tenantContext";
 import { verifyApiKey, TokenBucketRateLimiter } from "../knowledge/security/accessControl";
 import { recordAuditEvent } from "../knowledge/security/auditLog";
 import { AppError } from "../middleware/errorHandler";
@@ -20,10 +20,12 @@ function requireDatabaseUrl(): string {
   return databaseUrl;
 }
 
-async function requireInstallationId(databaseUrl: string): Promise<string> {
-  const installationId = await getActiveInstallationId(databaseUrl);
-  if (!installationId) throw new AppError(400, "No completed installation found", "Complete the installer (Phase 1) first.", true);
-  return installationId;
+// Thin wrapper around the shared tenant-aware resolver — kept under this
+// router's existing name/call shape (every call site here passes no
+// client-supplied installationId of its own; this router's operations —
+// backups, plugins, license — are always "the caller's own installation").
+async function requireInstallationId(req: Parameters<typeof resolveInstallationId>[0], databaseUrl: string): Promise<string> {
+  return resolveInstallationId(req, databaseUrl, undefined);
 }
 
 // `/health` is deliberately BEFORE the x-api-key gate below — an
@@ -65,10 +67,10 @@ deploymentRouter.use((req, res, next) => {
 
 // ── Backup Manager ───────────────────────────────────────────────────────
 
-deploymentRouter.get("/backups", async (_req, res, next) => {
+deploymentRouter.get("/backups", async (req, res, next) => {
   try {
     const databaseUrl = requireDatabaseUrl();
-    const installationId = await requireInstallationId(databaseUrl);
+    const installationId = await requireInstallationId(req, databaseUrl);
     const backups = await listBackups(databaseUrl, installationId);
     res.json({ success: true, data: backups.map((b) => ({ ...b, sizeBytes: b.sizeBytes !== null ? b.sizeBytes.toString() : null })) });
   } catch (err) {
@@ -84,7 +86,7 @@ deploymentRouter.post("/backups", async (req, res, next) => {
     const parsed = createBackupSchema.safeParse(req.body);
     if (!parsed.success) throw new AppError(400, "Invalid request body", parsed.error.issues.map((i) => i.message).join("; "), true);
     const databaseUrl = requireDatabaseUrl();
-    const installationId = await requireInstallationId(databaseUrl);
+    const installationId = await requireInstallationId(req, databaseUrl);
     const result = await runBackup(databaseUrl, installationId, "MANUAL", parsed.data.label ?? null);
     res.json({ success: true, data: { ...result, sizeBytes: String(result.sizeBytes) } });
   } catch (err) {
@@ -92,10 +94,10 @@ deploymentRouter.post("/backups", async (req, res, next) => {
   }
 });
 
-deploymentRouter.post("/backups/prune", async (_req, res, next) => {
+deploymentRouter.post("/backups/prune", async (req, res, next) => {
   try {
     const databaseUrl = requireDatabaseUrl();
-    const installationId = await requireInstallationId(databaseUrl);
+    const installationId = await requireInstallationId(req, databaseUrl);
     const retentionDays = Number(process.env.BACKUP_RETENTION_DAYS ?? "14");
     const pruned = await pruneOldBackups(databaseUrl, installationId, retentionDays);
     res.json({ success: true, data: { pruned } });
@@ -112,10 +114,10 @@ deploymentRouter.post("/backups/prune", async (_req, res, next) => {
 // on the host to perform one; this only confirms what's available to
 // restore *from*.
 
-deploymentRouter.get("/restore/available", async (_req, res, next) => {
+deploymentRouter.get("/restore/available", async (req, res, next) => {
   try {
     const databaseUrl = requireDatabaseUrl();
-    const installationId = await requireInstallationId(databaseUrl);
+    const installationId = await requireInstallationId(req, databaseUrl);
     const backups = await listBackups(databaseUrl, installationId);
     res.json({ success: true, data: backups.filter((b) => b.status === "COMPLETED").map((b) => ({ id: b.id, filePath: b.filePath, createdAt: b.createdAt, includes: b.includes })) });
   } catch (err) {
@@ -125,10 +127,10 @@ deploymentRouter.get("/restore/available", async (_req, res, next) => {
 
 // ── Plugin Management ────────────────────────────────────────────────────
 
-deploymentRouter.get("/plugins", async (_req, res, next) => {
+deploymentRouter.get("/plugins", async (req, res, next) => {
   try {
     const databaseUrl = requireDatabaseUrl();
-    const installationId = await requireInstallationId(databaseUrl);
+    const installationId = await requireInstallationId(req, databaseUrl);
     res.json({ success: true, data: await listPlugins(databaseUrl, installationId) });
   } catch (err) {
     next(err);
@@ -150,7 +152,7 @@ deploymentRouter.post("/plugins/install", async (req, res, next) => {
     const parsed = installPluginSchema.safeParse(req.body);
     if (!parsed.success) throw new AppError(400, "Invalid request body", parsed.error.issues.map((i) => i.message).join("; "), true);
     const databaseUrl = requireDatabaseUrl();
-    const installationId = await requireInstallationId(databaseUrl);
+    const installationId = await requireInstallationId(req, databaseUrl);
     const plugin = await installPlugin(databaseUrl, installationId, parsed.data.pluginDirName);
     res.json({ success: true, data: plugin });
   } catch (err) {
@@ -199,10 +201,10 @@ deploymentRouter.delete("/plugins/:id", async (req, res, next) => {
 
 // ── License Management ───────────────────────────────────────────────────
 
-deploymentRouter.get("/license", async (_req, res, next) => {
+deploymentRouter.get("/license", async (req, res, next) => {
   try {
     const databaseUrl = requireDatabaseUrl();
-    const installationId = await requireInstallationId(databaseUrl);
+    const installationId = await requireInstallationId(req, databaseUrl);
     const license = await getLicenseStatus(databaseUrl, installationId);
     res.json({ success: true, data: license });
   } catch (err) {
@@ -217,7 +219,7 @@ deploymentRouter.post("/license/activate", async (req, res, next) => {
     const parsed = activateLicenseSchema.safeParse(req.body);
     if (!parsed.success) throw new AppError(400, "Invalid request body", parsed.error.issues.map((i) => i.message).join("; "), true);
     const databaseUrl = requireDatabaseUrl();
-    const installationId = await requireInstallationId(databaseUrl);
+    const installationId = await requireInstallationId(req, databaseUrl);
     const result = await activateLicense(databaseUrl, installationId, parsed.data.licenseFileContent);
     if (!result.ok) throw new AppError(422, "License activation failed", result.detail, false);
     res.json({ success: true, data: result.license });
@@ -226,10 +228,10 @@ deploymentRouter.post("/license/activate", async (req, res, next) => {
   }
 });
 
-deploymentRouter.post("/license/validate", async (_req, res, next) => {
+deploymentRouter.post("/license/validate", async (req, res, next) => {
   try {
     const databaseUrl = requireDatabaseUrl();
-    const installationId = await requireInstallationId(databaseUrl);
+    const installationId = await requireInstallationId(req, databaseUrl);
     const result = await validateLicense(databaseUrl, installationId);
     res.json({ success: true, data: result });
   } catch (err) {

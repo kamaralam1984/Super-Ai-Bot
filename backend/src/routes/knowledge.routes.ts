@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { runKnowledgeBuild } from "../knowledge/knowledgeBuilder.service";
 import { performKnowledgeSearch } from "../knowledge/knowledgeSearch.service";
-import { getActiveInstallationId } from "../scanner/scanRecord.service";
+import { resolveInstallationId } from "../middleware/tenantContext";
 import { KnowledgeRecordService } from "../knowledge/knowledgeRecord.service";
 import { planRollback, type VersionedChunkState } from "../knowledge/version/versionManager";
 import { rollbackTrainingRun } from "../knowledge/rollback/trainingRunRollback.service";
@@ -111,10 +111,7 @@ knowledgeRouter.post("/search", async (req, res, next) => {
     if (!databaseUrl) {
       throw new AppError(400, "No database configured", "Complete the installer (Phase 1) first.", true);
     }
-    const installationId = await getActiveInstallationId(databaseUrl);
-    if (!installationId) {
-      throw new AppError(400, "No completed installation found", "Complete the installer (Phase 1) first.", true);
-    }
+    const installationId = await resolveInstallationId(req, databaseUrl, undefined);
 
     const result = await performKnowledgeSearch(databaseUrl, { installationId, ...parsed.data });
     res.json({ success: true, data: result });

@@ -5,6 +5,7 @@ import { listDataScopeDefinitions } from "../permission/catalog/dataScopeCatalog
 import { ALL_DATA_SCOPES } from "../permission/types";
 import { verifyApiKey, TokenBucketRateLimiter } from "../knowledge/security/accessControl";
 import { recordAuditEvent } from "../knowledge/security/auditLog";
+import { resolveInstallationId } from "../middleware/tenantContext";
 import { AppError } from "../middleware/errorHandler";
 
 export const permissionRouter = Router();
@@ -57,20 +58,20 @@ const dataScopeSchema = z.enum(ALL_DATA_SCOPES as [string, ...string[]]);
 
 /** Current wizard state for an installation's own knowledge base (no connectorId) or one specific Phase 5 connector. */
 permissionRouter.get("/wizard", async (req, res, next) => {
-  const installationId = typeof req.query.installationId === "string" ? req.query.installationId : undefined;
-  const connectorId = typeof req.query.connectorId === "string" ? req.query.connectorId : null;
-  if (!installationId) {
-    next(new AppError(400, "installationId query parameter is required", "Pass ?installationId=... .", true));
-    return;
-  }
-  const orchestrator = new PermissionOrchestratorService(requireDatabaseUrl());
   try {
-    const state = await orchestrator.getWizardState(installationId, connectorId);
-    res.json({ success: true, data: state });
+    const clientSupplied = typeof req.query.installationId === "string" ? req.query.installationId : undefined;
+    const connectorId = typeof req.query.connectorId === "string" ? req.query.connectorId : null;
+    const databaseUrl = requireDatabaseUrl();
+    const installationId = await resolveInstallationId(req, databaseUrl, clientSupplied);
+    const orchestrator = new PermissionOrchestratorService(databaseUrl);
+    try {
+      const state = await orchestrator.getWizardState(installationId, connectorId);
+      res.json({ success: true, data: state });
+    } finally {
+      await orchestrator.close();
+    }
   } catch (err) {
     next(err);
-  } finally {
-    await orchestrator.close();
   }
 });
 
@@ -96,10 +97,12 @@ permissionRouter.post("/wizard", async (req, res, next) => {
     next(new AppError(400, "Invalid request body", parsed.error.issues.map((i) => i.message).join("; "), true));
     return;
   }
-  const orchestrator = new PermissionOrchestratorService(requireDatabaseUrl());
+  const databaseUrl = requireDatabaseUrl();
+  const orchestrator = new PermissionOrchestratorService(databaseUrl);
   try {
+    const installationId = await resolveInstallationId(req, databaseUrl, parsed.data.installationId);
     const result = await orchestrator.submitWizard({
-      installationId: parsed.data.installationId,
+      installationId,
       connectorId: parsed.data.connectorId ?? null,
       grantedScopes: parsed.data.grantedScopes as never,
       actor: parsed.data.actor,
@@ -128,10 +131,12 @@ permissionRouter.post("/grant", async (req, res, next) => {
     next(new AppError(400, "Invalid request body", parsed.error.issues.map((i) => i.message).join("; "), true));
     return;
   }
-  const orchestrator = new PermissionOrchestratorService(requireDatabaseUrl());
+  const databaseUrl = requireDatabaseUrl();
+  const orchestrator = new PermissionOrchestratorService(databaseUrl);
   try {
+    const installationId = await resolveInstallationId(req, databaseUrl, parsed.data.installationId);
     const result = await orchestrator.submitWizard({
-      installationId: parsed.data.installationId,
+      installationId,
       connectorId: parsed.data.connectorId ?? null,
       grantedScopes: [parsed.data.dataScope as never],
       actor: parsed.data.grantedBy,
@@ -158,12 +163,14 @@ permissionRouter.post("/revoke", async (req, res, next) => {
     next(new AppError(400, "Invalid request body", parsed.error.issues.map((i) => i.message).join("; "), true));
     return;
   }
-  const orchestrator = new PermissionOrchestratorService(requireDatabaseUrl());
+  const databaseUrl = requireDatabaseUrl();
+  const orchestrator = new PermissionOrchestratorService(databaseUrl);
   try {
-    const currentState = await orchestrator.getWizardState(parsed.data.installationId, parsed.data.connectorId ?? null);
+    const installationId = await resolveInstallationId(req, databaseUrl, parsed.data.installationId);
+    const currentState = await orchestrator.getWizardState(installationId, parsed.data.connectorId ?? null);
     const remaining = currentState.options.filter((o) => o.granted && o.scope !== parsed.data.dataScope).map((o) => o.scope);
     const result = await orchestrator.submitWizard({
-      installationId: parsed.data.installationId,
+      installationId,
       connectorId: parsed.data.connectorId ?? null,
       grantedScopes: remaining,
       actor: parsed.data.revokedBy,
@@ -178,39 +185,39 @@ permissionRouter.post("/revoke", async (req, res, next) => {
 
 /** Full grant history (active + revoked) for an installation, optionally narrowed to one connector — the admin UI's "who authorized what, and when" view. */
 permissionRouter.get("/grants", async (req, res, next) => {
-  const installationId = typeof req.query.installationId === "string" ? req.query.installationId : undefined;
-  if (!installationId) {
-    next(new AppError(400, "installationId query parameter is required", "Pass ?installationId=... .", true));
-    return;
-  }
-  const connectorId = typeof req.query.connectorId === "string" ? req.query.connectorId : undefined;
-  const orchestrator = new PermissionOrchestratorService(requireDatabaseUrl());
   try {
-    const grants = await orchestrator.listGrants(installationId, connectorId);
-    res.json({ success: true, data: grants });
+    const clientSupplied = typeof req.query.installationId === "string" ? req.query.installationId : undefined;
+    const connectorId = typeof req.query.connectorId === "string" ? req.query.connectorId : undefined;
+    const databaseUrl = requireDatabaseUrl();
+    const installationId = await resolveInstallationId(req, databaseUrl, clientSupplied);
+    const orchestrator = new PermissionOrchestratorService(databaseUrl);
+    try {
+      const grants = await orchestrator.listGrants(installationId, connectorId);
+      res.json({ success: true, data: grants });
+    } finally {
+      await orchestrator.close();
+    }
   } catch (err) {
     next(err);
-  } finally {
-    await orchestrator.close();
   }
 });
 
 /** The Permission Engine's own audit trail — grants, revocations, and every access check (allowed or denied) made against it. */
 permissionRouter.get("/events", async (req, res, next) => {
-  const installationId = typeof req.query.installationId === "string" ? req.query.installationId : undefined;
-  if (!installationId) {
-    next(new AppError(400, "installationId query parameter is required", "Pass ?installationId=... .", true));
-    return;
-  }
-  const limit = typeof req.query.limit === "string" ? Number(req.query.limit) : undefined;
-  const orchestrator = new PermissionOrchestratorService(requireDatabaseUrl());
   try {
-    const events = await orchestrator.listEvents(installationId, limit);
-    res.json({ success: true, data: events });
+    const clientSupplied = typeof req.query.installationId === "string" ? req.query.installationId : undefined;
+    const limit = typeof req.query.limit === "string" ? Number(req.query.limit) : undefined;
+    const databaseUrl = requireDatabaseUrl();
+    const installationId = await resolveInstallationId(req, databaseUrl, clientSupplied);
+    const orchestrator = new PermissionOrchestratorService(databaseUrl);
+    try {
+      const events = await orchestrator.listEvents(installationId, limit);
+      res.json({ success: true, data: events });
+    } finally {
+      await orchestrator.close();
+    }
   } catch (err) {
     next(err);
-  } finally {
-    await orchestrator.close();
   }
 });
 
@@ -228,10 +235,12 @@ permissionRouter.post("/check", async (req, res, next) => {
     next(new AppError(400, "Invalid request body", parsed.error.issues.map((i) => i.message).join("; "), true));
     return;
   }
-  const orchestrator = new PermissionOrchestratorService(requireDatabaseUrl());
+  const databaseUrl = requireDatabaseUrl();
+  const orchestrator = new PermissionOrchestratorService(databaseUrl);
   try {
+    const installationId = await resolveInstallationId(req, databaseUrl, parsed.data.installationId);
     const decision = await orchestrator.checkAccess({
-      installationId: parsed.data.installationId,
+      installationId,
       connectorId: parsed.data.connectorId ?? null,
       dataScope: parsed.data.dataScope as never,
       purpose: parsed.data.purpose,

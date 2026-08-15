@@ -9,6 +9,7 @@ import { PermissionOrchestratorService } from "../permission/permissionOrchestra
 import { verifyApiKey, TokenBucketRateLimiter } from "../knowledge/security/accessControl";
 import { recordAuditEvent } from "../knowledge/security/auditLog";
 import { getSocketServer } from "../ws/socket";
+import { resolveInstallationId } from "../middleware/tenantContext";
 import { AppError } from "../middleware/errorHandler";
 import { logEvent } from "../utils/logger";
 import { formatError } from "../utils/formatError";
@@ -125,14 +126,15 @@ const scheduleBodySchema = z.object({
 });
 
 /** Registers a recurring scheduled retrain (in-process — see retrainScheduler.ts for the documented "doesn't survive a restart" limitation). */
-trainingRouter.post("/schedule", (req, res, next) => {
+trainingRouter.post("/schedule", async (req, res, next) => {
   const parsed = scheduleBodySchema.safeParse(req.body);
   if (!parsed.success) {
     next(new AppError(400, "Invalid request body", parsed.error.issues.map((i) => i.message).join("; "), true));
     return;
   }
   try {
-    const { installationId, crawlJobId, intervalMs, socketId } = parsed.data;
+    const { crawlJobId, intervalMs, socketId } = parsed.data;
+    const installationId = await resolveInstallationId(req, requireDatabaseUrl(), parsed.data.installationId);
     const handleId = scheduler.scheduleRecurring({ installationId, crawlJobId, intervalMs });
     scheduleSocketIds.set(`${installationId}:${crawlJobId}`, socketId);
     res.json({ success: true, data: { handleId } });
@@ -168,32 +170,30 @@ trainingRouter.get("/report/:crawlJobId", async (req, res, next) => {
 
 /** Chronological training-run history for an installation — the "Knowledge Timeline" view. */
 trainingRouter.get("/reports", async (req, res, next) => {
-  const installationId = typeof req.query.installationId === "string" ? req.query.installationId : undefined;
-  if (!installationId) {
-    next(new AppError(400, "installationId query parameter is required", "Pass ?installationId=... .", true));
-    return;
-  }
-  const records = new TrainingRecordService(requireDatabaseUrl());
   try {
-    const reports = await records.listTrainingReports(installationId);
-    res.json({ success: true, data: reports });
+    const clientSupplied = typeof req.query.installationId === "string" ? req.query.installationId : undefined;
+    const databaseUrl = requireDatabaseUrl();
+    const installationId = await resolveInstallationId(req, databaseUrl, clientSupplied);
+    const records = new TrainingRecordService(databaseUrl);
+    try {
+      const reports = await records.listTrainingReports(installationId);
+      res.json({ success: true, data: reports });
+    } finally {
+      await records.close();
+    }
   } catch (err) {
     next(err);
-  } finally {
-    await records.close();
   }
 });
 
 /** The knowledge relationship graph for an installation — permission-checked per edge (see permission/integration/authorizedTrainingRecordService.ts) since a relationship can expose which Products/Services/FAQs exist even without querying those tables directly. */
 trainingRouter.get("/relationships", async (req, res, next) => {
-  const installationId = typeof req.query.installationId === "string" ? req.query.installationId : undefined;
-  if (!installationId) {
-    next(new AppError(400, "installationId query parameter is required", "Pass ?installationId=... .", true));
-    return;
-  }
-  const rawRecords = new TrainingRecordService(requireDatabaseUrl());
-  const permissions = new PermissionOrchestratorService(requireDatabaseUrl());
+  const databaseUrl = requireDatabaseUrl();
+  const rawRecords = new TrainingRecordService(databaseUrl);
+  const permissions = new PermissionOrchestratorService(databaseUrl);
   try {
+    const clientSupplied = typeof req.query.installationId === "string" ? req.query.installationId : undefined;
+    const installationId = await resolveInstallationId(req, databaseUrl, clientSupplied);
     const records = new AuthorizedTrainingRecordService(rawRecords, permissions, installationId);
     const relationships = await records.getRelationshipsForInstallation(installationId);
     res.json({ success: true, data: relationships });
