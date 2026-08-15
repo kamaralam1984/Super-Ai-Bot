@@ -31,6 +31,36 @@ enum LogStatus {
   ERROR
 }
 
+enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+  PENDING_ONBOARDING
+}
+
+// One row per signed-up SaaS tenant (a business, not a person — this
+// product has no multi-user-per-tenant concept, one login = one
+// business). Deliberately separate from Installation rather than folded
+// into it: Installation stays "the thing a scan/knowledge-base/chat
+// pipeline runs against," Account is "who owns and logs into that."
+// installation.accountId is nullable — NULL means the legacy,
+// single-tenant platform-owner installation (managed via the existing
+// API_SECRET admin path, never through this model).
+model Account {
+  id              String        @id @default(cuid())
+  email           String        @unique
+  passwordHash    String
+  businessName    String
+  status          AccountStatus @default(PENDING_ONBOARDING)
+  emailVerifiedAt DateTime?
+  lastLoginAt     DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  installation Installation?
+
+  @@map("accounts")
+}
+
 model Installation {
   id             String             @id @default(cuid())
   applicationId  String             @unique
@@ -40,6 +70,12 @@ model Installation {
   status         InstallationStatus @default(IN_PROGRESS)
   startedAt      DateTime           @default(now())
   completedAt    DateTime?
+
+  // Nullable and unique: NULL = the legacy platform-owner installation
+  // (this deployment's own KVL instance), non-null = a SaaS tenant's
+  // installation, one per Account (no multi-site-per-tenant yet).
+  accountId String?  @unique
+  account   Account? @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
   secretFingerprints   SecretFingerprint[]
   logs                 InstallationLog[]

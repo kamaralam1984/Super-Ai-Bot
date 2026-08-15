@@ -270,17 +270,24 @@ export class ScanRecordService {
 }
 
 /**
- * The installer (Phase 1) is single-tenant per deployment — there's exactly
- * one completed Installation per running instance. The scanner needs that
- * row's internal id (a cuid, not the human-readable installationId string)
- * to satisfy CrawlJob's foreign key, so it looks up the most recent
- * COMPLETED installation rather than requiring a caller to somehow already
- * know an id they have no other way to obtain.
+ * Resolves the legacy, single-tenant platform-owner installation — the one
+ * this deployment's own KVL instance manages through the existing
+ * API_SECRET admin path, identified by `accountId: null` (a SaaS tenant's
+ * installation always has an accountId; see backend/prisma/schema.prisma's
+ * Account model). Every caller here is either process-level tooling
+ * (backup/restore CLI, health checks, metrics) that has no per-request
+ * tenant context, or the fallback branch of
+ * backend/src/middleware/tenantContext.ts's resolveInstallationId for a
+ * super-admin caller with no explicit installationId — both cases
+ * correctly mean "the platform owner's own installation," never a tenant's.
  */
 export async function getActiveInstallationId(databaseUrl: string): Promise<string | null> {
   const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
   try {
-    const installation = await prisma.installation.findFirst({ where: { status: "COMPLETED" }, orderBy: { startedAt: "desc" } });
+    const installation = await prisma.installation.findFirst({
+      where: { status: "COMPLETED", accountId: null },
+      orderBy: { startedAt: "desc" },
+    });
     return installation?.id ?? null;
   } finally {
     await prisma.$disconnect();

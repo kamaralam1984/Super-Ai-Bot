@@ -68,7 +68,12 @@ adminAuthRouter.get("/installation", async (req, res, next) => {
 
     const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
     try {
-      const installation = await prisma.installation.findFirst({ where: { status: "COMPLETED" }, orderBy: { startedAt: "desc" } });
+      // accountId: null — the platform owner's own installation, not a
+      // SaaS tenant's (see scanRecord.service.ts's getActiveInstallationId
+      // for the identical reasoning; this route duplicates that lookup
+      // inline because /api/admin is mounted before the generic session
+      // middleware that would otherwise let it reuse a shared resolver).
+      const installation = await prisma.installation.findFirst({ where: { status: "COMPLETED", accountId: null }, orderBy: { startedAt: "desc" } });
       if (!installation) throw new AppError(404, "No completed installation found", undefined, false);
       res.json({
         success: true,
