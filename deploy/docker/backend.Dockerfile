@@ -21,9 +21,13 @@
 FROM node:20-bookworm-slim AS builder
 
 # python3/make/g++ are required to compile this project's two native
-# addons (argon2, hnswlib-node) via node-gyp during `npm ci`.
+# addons (argon2, hnswlib-node) via node-gyp during `npm ci`. libvips-dev
+# lets sharp's install script build from source when it can't reach
+# GitHub Releases for its prebuilt binary (flaky/blocked on some hosts —
+# observed failing consistently on one production VPS) — without it,
+# sharp's install has no fallback and `npm ci` hard-fails.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3 make g++ \
+      python3 make g++ libvips-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
