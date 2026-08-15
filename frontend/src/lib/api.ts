@@ -58,7 +58,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   });
   const json = (await res.json()) as ApiEnvelope<T>;
-  if (!res.ok || !json.success || !json.data) {
+  // Trust the envelope's `success` flag, not the raw HTTP status: routes like
+  // /deployment/health intentionally return a non-2xx status (e.g. 503) to
+  // signal "degraded" to external monitoring tools while still returning a
+  // real, successfully-fetched payload (success: true, data populated).
+  // Gating on res.ok here would discard that valid data.
+  if (!json.success || !json.data) {
     throw new ApiError(json.error?.message ?? `Request to ${path} failed`, json.error?.suggestedFix ?? null, json.error?.retryable ?? true);
   }
   return json.data;
