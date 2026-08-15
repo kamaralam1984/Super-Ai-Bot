@@ -109,6 +109,22 @@ export const api = {
     installation: () => request<AdminInstallation>("/admin/installation"),
   },
 
+  // SaaS tenant surface — mirrors `admin` above exactly, but for a
+  // self-registered business rather than this deployment's own
+  // platform-owner admin. Separate cookie/session on the backend
+  // (kvl_tenant_session vs kvl_admin_session) so both can be logged in
+  // simultaneously in one browser.
+  tenant: {
+    signup: (input: { businessName: string; websiteUrl: string; email: string; password: string }) =>
+      request<{ accountId: string; installationId: string }>("/tenant/signup", { method: "POST", body: JSON.stringify(input) }),
+    startOnboarding: (input: { socketId: string; grantedScopes?: DataScope[] }) =>
+      request<{ started: boolean }>("/tenant/onboarding/start", { method: "POST", body: JSON.stringify(input) }),
+    login: (email: string, password: string) => request<{ authenticated: boolean }>("/tenant/login", { method: "POST", body: JSON.stringify({ email, password }) }),
+    logout: () => request<{ authenticated: boolean }>("/tenant/logout", { method: "POST" }),
+    session: () => request<{ authenticated: boolean }>("/tenant/session"),
+    installation: () => request<AdminInstallation>("/tenant/installation"),
+  },
+
   // Phase 2 — Website Auto Scanner.
   scan: {
     start: (input: { websiteUrl: string; socketId: string; maxDepth?: number; maxPages?: number; concurrency?: number }) =>
