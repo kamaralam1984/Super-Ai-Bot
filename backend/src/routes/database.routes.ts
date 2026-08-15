@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { initializeDatabase, rollbackDatabase, getMigrationStatus } from "../services/database.service";
 import { AppError } from "../middleware/errorHandler";
+import { rejectIfInstalled } from "../middleware/rejectIfInstalled";
 
 export const databaseRouter = Router();
 
@@ -18,7 +19,7 @@ function readDbCredentialsFromEnv(): { databaseName: string; databaseUser: strin
   };
 }
 
-databaseRouter.post("/initialize", async (_req, res, next) => {
+databaseRouter.post("/initialize", rejectIfInstalled, async (_req, res, next) => {
   try {
     const credentials = readDbCredentialsFromEnv();
     const result = await initializeDatabase(credentials);
@@ -37,7 +38,7 @@ databaseRouter.get("/status", async (_req, res, next) => {
   }
 });
 
-databaseRouter.post("/rollback", async (_req, res, next) => {
+databaseRouter.post("/rollback", rejectIfInstalled, async (_req, res, next) => {
   try {
     const credentials = readDbCredentialsFromEnv();
     await rollbackDatabase(credentials);

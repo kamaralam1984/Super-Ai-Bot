@@ -3,6 +3,7 @@ import { z } from "zod";
 import { runInstallation } from "../services/installOrchestrator.service";
 import { getSocketServer } from "../ws/socket";
 import { AppError } from "../middleware/errorHandler";
+import { rejectIfInstalled } from "../middleware/rejectIfInstalled";
 import { logEvent } from "../utils/logger";
 import { ALL_DATA_SCOPES } from "../permission/types";
 
@@ -24,7 +25,7 @@ const bodySchema = z.object({
  * streamed to the caller's own WebSocket room (their socketId) via
  * install:progress / install:error events, not via this HTTP response.
  */
-installRouter.post("/start", async (req, res, next) => {
+installRouter.post("/start", rejectIfInstalled, async (req, res, next) => {
   try {
     const parsed = bodySchema.safeParse(req.body);
     if (!parsed.success) {

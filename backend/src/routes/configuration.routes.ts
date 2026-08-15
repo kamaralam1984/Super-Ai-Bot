@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { generateInstallationConfig } from "../services/config.service";
 import { AppError } from "../middleware/errorHandler";
+import { rejectIfInstalled } from "../middleware/rejectIfInstalled";
 
 export const configurationRouter = Router();
 
@@ -10,7 +11,7 @@ const bodySchema = z.object({
   websiteUrl: z.string().url(),
 });
 
-configurationRouter.post("/", async (req, res, next) => {
+configurationRouter.post("/", rejectIfInstalled, async (req, res, next) => {
   try {
     const parsed = bodySchema.safeParse(req.body);
     if (!parsed.success) {
