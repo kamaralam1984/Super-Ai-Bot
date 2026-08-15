@@ -1,5 +1,5 @@
 import { Outlet, Navigate, NavLink, useLocation } from "react-router-dom";
-import { LayoutDashboard, ShieldCheck, LogOut, Loader2, GraduationCap, Plug, MessageSquare, Radar, HardDriveDownload, Blocks, BadgeCheck, Settings } from "lucide-react";
+import { LayoutDashboard, ShieldCheck, LogOut, Loader2, GraduationCap, Plug, MessageSquare, Radar, Settings } from "lucide-react";
 import { AmbientCanvas } from "../../components/AmbientCanvas";
 import { ThemeToggle } from "../../components/ThemeToggle";
 import { useTenantSession } from "../../hooks/useTenantSession";
@@ -10,15 +10,21 @@ import { useTenantSession } from "../../hooks/useTenantSession";
 // useOutletContext and never cares which session type produced it. Only
 // this layout + useTenantSession differ: /app/* paths instead of
 // /dashboard/*, /tenant/login instead of /login.
+//
+// Deliberately omits Backups/Plugins/License, unlike the super-admin
+// nav: Backups cover the *entire shared platform database* (every
+// tenant's data in one pg_dump — see deployment.routes.ts's
+// rejectTenantSession, which the backend enforces regardless of what
+// this nav shows), and Plugins/License are platform-operator concepts
+// (a shared on-disk plugin directory, an offline license file for this
+// deployment) with no real meaning for a self-serve tenant who doesn't
+// own the underlying infrastructure.
 const NAV_ITEMS = [
   { to: "/app", label: "Overview", icon: LayoutDashboard, end: true },
   { to: "/app/training", label: "Website & Training", icon: GraduationCap },
   { to: "/app/connectors", label: "Connectors", icon: Plug },
   { to: "/app/chat", label: "Chat", icon: MessageSquare },
   { to: "/app/monitoring", label: "Monitoring", icon: Radar },
-  { to: "/app/backups", label: "Backups", icon: HardDriveDownload },
-  { to: "/app/plugins", label: "Plugins", icon: Blocks },
-  { to: "/app/license", label: "License", icon: BadgeCheck },
   { to: "/app/settings", label: "Settings", icon: Settings },
   { to: "/app/permissions", label: "AI Data Permissions", icon: ShieldCheck },
 ];

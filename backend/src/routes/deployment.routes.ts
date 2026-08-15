@@ -65,7 +65,27 @@ deploymentRouter.use((req, res, next) => {
   next();
 });
 
+// Backups/restore are NOT tenant-safe: runBackup() (backupService.ts)
+// pg_dumps the entire shared database — every tenant's data in one
+// file — using installationId only to tag the *record*, not to scope
+// the dump itself. A per-tenant backup subsystem is a real follow-up
+// (would need a scoped export, not pg_dump), not something to fake here
+// by just hiding the button — the API itself must refuse a tenant
+// session, since a raw x-api-key + tenant cookie caller could otherwise
+// still reach this directly.
+function rejectTenantSession(req: Parameters<typeof resolveInstallationId>[0], res: import("express").Response, next: import("express").NextFunction): void {
+  if (req.tenantContext) {
+    next(new AppError(403, "Not available for tenant accounts", "Backups cover the entire shared platform database and are managed by the platform operator only.", false));
+    return;
+  }
+  next();
+}
+
 // ── Backup Manager ───────────────────────────────────────────────────────
+
+// router.use(path, ...) prefix-matches, so "/backups" alone also covers
+// POST /backups/prune, and "/restore" covers GET /restore/available.
+deploymentRouter.use(["/backups", "/restore"], rejectTenantSession);
 
 deploymentRouter.get("/backups", async (req, res, next) => {
   try {
