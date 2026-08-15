@@ -57,6 +57,7 @@
     var qs = new URLSearchParams(location.search);
     var colorParam = qs.get("color");
     var greetingParam = qs.get("greeting");
+    var installationIdParam = qs.get("installationId");
     if (colorParam) document.documentElement.style.setProperty("--accent", colorParam);
 
     var messagesEl = document.getElementById("messages");
@@ -135,7 +136,7 @@
       if (e.key === "Enter") sendMessage(inputEl.value);
     });
 
-    fetch("/api/chat/config")
+    fetch("/api/chat/config" + (installationIdParam ? "?installationId=" + encodeURIComponent(installationIdParam) : ""))
       .then(function (r) { return r.json(); })
       .then(function (res) {
         if (!res.success) throw new Error("config unavailable");

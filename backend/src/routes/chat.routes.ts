@@ -56,8 +56,19 @@ function requireDatabaseUrl(): string {
  * back to the legacy accountId:null installation exactly as before, so
  * KVL's own existing embed (no query param) is unaffected.
  */
+// This route is registered before the router-wide PUBLIC_RATE_LIMIT
+// middleware below (Express matches in registration order), so it needs
+// its own — it's the one unauthenticated GET on this router with no
+// visitor-fingerprint header to key off, just the caller's IP.
+const CONFIG_RATE_LIMIT = new TokenBucketRateLimiter({ maxTokens: 30, refillPerSecond: 3 });
+
 chatRouter.get("/config", async (req, res, next) => {
   try {
+    const clientId = req.ip ?? "unknown";
+    if (!CONFIG_RATE_LIMIT.tryConsume(clientId)) {
+      recordAuditEvent({ type: "rate_limited", detail: `client=${clientId} path=/api/chat/config`, component: "chat-security" });
+      throw new AppError(429, "Too many requests", "Slow down and try again shortly.", true);
+    }
     const databaseUrl = requireDatabaseUrl();
     const publicInstallationId = typeof req.query.installationId === "string" ? req.query.installationId : undefined;
 

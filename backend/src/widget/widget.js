@@ -5,7 +5,11 @@
  *   <script src="https://<this-server>/widget.js"></script>
  * Optional attributes: data-position ("bottom-right" | "bottom-left"),
  * data-color (any CSS color, defaults to the product's amber accent),
- * data-greeting (overrides the default first bot message).
+ * data-greeting (overrides the default first bot message),
+ * data-installation-id (a SaaS tenant's public Installation.installationId
+ * — not a secret, the same way the chat config this identifies is already
+ * public; omit it on a single-tenant deployment and the backend falls
+ * back to its one legacy installation exactly as before).
  *
  * Deliberately dependency-free vanilla JS (no bundler, no framework) —
  * this file is served byte-for-byte to arbitrary third-party sites, so it
@@ -49,6 +53,7 @@
   var position = (scriptEl.getAttribute("data-position") || "bottom-right").toLowerCase();
   var color = scriptEl.getAttribute("data-color") || "#e8a838";
   var greeting = scriptEl.getAttribute("data-greeting") || "";
+  var installationId = scriptEl.getAttribute("data-installation-id") || "";
   var isLeft = position.indexOf("left") !== -1;
   var side = isLeft ? "left" : "right";
 
@@ -106,6 +111,7 @@
       var params = new URLSearchParams();
       params.set("color", color);
       if (greeting) params.set("greeting", greeting);
+      if (installationId) params.set("installationId", installationId);
       iframe.src = origin + "/widget?" + params.toString();
       iframe.title = "Chat";
       iframe.setAttribute("allow", "clipboard-write");
