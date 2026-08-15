@@ -8,8 +8,10 @@ import { bootConfig, isInstalled } from "./config/env";
 import { APP_ROOT } from "./config/paths";
 import { apiRouter } from "./routes";
 import { adminAuthRouter } from "./routes/adminAuth.routes";
+import { tenantAuthRouter } from "./routes/tenantAuth.routes";
 import { widgetRouter } from "./routes/widget.routes";
 import { injectApiKeyFromSession } from "./middleware/adminSession";
+import { injectTenantContext } from "./middleware/tenantSession";
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler";
 import { metricsMiddleware, getMetrics } from "./deployment/monitoring/metrics";
 
@@ -23,11 +25,11 @@ export function createApp(): Express {
       contentSecurityPolicy: bootConfig.NODE_ENV === "production" ? undefined : false,
     })
   );
-  // Port must match vite.config.ts's dev server.port (3041) — a mismatch
+  // Port must match vite.config.ts's dev server.port (3048) — a mismatch
   // here silently breaks credentialed (cookie-carrying) requests in dev,
   // since the browser CORS-blocks a cross-origin request whose origin
   // isn't explicitly allow-listed even before it reaches this server.
-  app.use(cors({ origin: bootConfig.NODE_ENV === "development" ? "http://localhost:3041" : true, credentials: true }));
+  app.use(cors({ origin: bootConfig.NODE_ENV === "development" ? "http://localhost:3048" : true, credentials: true }));
   app.use(
     express.json({
       limit: "1mb",
@@ -63,7 +65,10 @@ export function createApp(): Express {
   // for every route inside apiRouter without any of those routes' own
   // auth middleware needing to change.
   app.use("/api/admin", adminAuthRouter);
-  app.use("/api", injectApiKeyFromSession, apiRouter);
+  // Same "mounted before the injected-auth middleware, unauthenticated on
+  // purpose" reasoning as /api/admin above — signup/login IS the point.
+  app.use("/api/tenant", tenantAuthRouter);
+  app.use("/api", injectApiKeyFromSession, injectTenantContext, apiRouter);
   // Public, unauthenticated, and outside /api on purpose — see
   // widget.routes.ts's own header comment.
   app.use(widgetRouter);

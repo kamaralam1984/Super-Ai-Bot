@@ -103,6 +103,37 @@ export interface InstallLogEntry {
   error?: string;
 }
 
+// A SaaS tenant's post-signup onboarding pipeline (scan + train + apply
+// permissions on their own already-created Installation row) — a shorter
+// step vocabulary than InstallStepId's, since none of the
+// platform-installer-only steps (system check, environment validation,
+// configuration/secret generation, database provisioning, directories)
+// apply once a tenant is signing up into an already-provisioned shared
+// database. Structurally identical event/error shapes to
+// InstallProgressEvent/InstallErrorDetail (frontend/src/pages/steps/
+// InstallingStep.tsx is retargeted to these via a prop, not rewritten) but
+// kept as separate types since the two step vocabularies are genuinely
+// different, not a subset/superset relationship worth modeling as one union.
+export type OnboardingStepId = "permissions" | "scanning" | "training" | "finalizing";
+
+export interface OnboardingProgressEvent {
+  stepId: OnboardingStepId;
+  label: string;
+  status: "running" | "success" | "error";
+  message: string;
+  progressPercent: number;
+  timestamp: string;
+  durationMs?: number;
+}
+
+export interface OnboardingErrorDetail {
+  stepId: OnboardingStepId;
+  title: string;
+  message: string;
+  suggestedFix: string;
+  retryable: boolean;
+}
+
 export interface DirectoryEntry {
   name: string;
   path: string;

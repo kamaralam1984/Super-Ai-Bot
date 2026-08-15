@@ -1,6 +1,18 @@
 import { PrismaClient, type InstallationStatus, type LogStatus } from "@prisma/client";
 import { logEvent } from "../utils/logger";
-import type { InstallProgressEvent } from "@kvl/shared";
+
+// Structurally compatible with both InstallProgressEvent and
+// OnboardingProgressEvent (@kvl/shared) — this function only ever reads
+// these fields to write an InstallationLog row, so it's kept independent
+// of either event union's specific stepId vocabulary rather than
+// requiring a lossy cast at every call site.
+interface ProgressEventLike {
+  stepId: string;
+  status: "running" | "success" | "error";
+  message: string;
+  timestamp: string;
+  durationMs?: number;
+}
 
 /**
  * These records live inside the *product's own* per-installation database
@@ -49,13 +61,13 @@ export async function recordSecretFingerprints(databaseUrl: string, installation
   }
 }
 
-const EVENT_TO_LOG_STATUS: Record<InstallProgressEvent["status"], LogStatus> = {
+const EVENT_TO_LOG_STATUS: Record<ProgressEventLike["status"], LogStatus> = {
   running: "INFO",
   success: "SUCCESS",
   error: "ERROR",
 };
 
-export async function recordProgressEvents(databaseUrl: string, installationRowId: string, events: InstallProgressEvent[]): Promise<void> {
+export async function recordProgressEvents(databaseUrl: string, installationRowId: string, events: ProgressEventLike[]): Promise<void> {
   if (events.length === 0) return;
   const prisma = clientFor(databaseUrl);
   try {
