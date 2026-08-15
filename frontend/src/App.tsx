@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { InstallWizard } from "./pages/InstallWizard";
 import { AdminLogin } from "./pages/AdminLogin";
 import { DashboardLayout } from "./pages/dashboard/DashboardLayout";
@@ -22,6 +22,13 @@ import { SettingsPage } from "./pages/dashboard/SettingsPage";
  * 409 several steps in. `installed` starts `null` (checking) rather than a
  * boolean default, so a slow/failed health check doesn't briefly render the
  * wrong screen either way.
+ *
+ * Once installed, "/" hands anonymous visitors the public chat widget page
+ * (GET /widget, served by the backend — see widget.routes.ts and
+ * kvl-locations.conf's dedicated location block) rather than the admin
+ * login — a full `window.location` navigation, not client-side <Navigate>,
+ * since /widget isn't part of this SPA's route table. An admin still
+ * reaches /login directly by URL; this only changes the default landing.
  */
 function RootRoute() {
   const [installed, setInstalled] = useState<boolean | null>(null);
@@ -33,8 +40,12 @@ function RootRoute() {
       .catch(() => setInstalled(false));
   }, []);
 
-  if (installed === null) return null;
-  return installed ? <Navigate to="/login" replace /> : <InstallWizard />;
+  useEffect(() => {
+    if (installed) window.location.replace("/widget");
+  }, [installed]);
+
+  if (installed === null || installed) return null;
+  return <InstallWizard />;
 }
 
 export default function App() {
