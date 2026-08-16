@@ -22,6 +22,13 @@ enum InstallationStatus {
   COMPLETED
   FAILED
   ROLLED_BACK
+  // A tenant-initiated pause ("Delete Chatbot" in the dashboard) — every
+  // lookup that requires COMPLETED (getActiveInstallationId, the widget's
+  // /api/chat/config) naturally stops matching a DISABLED row, so the
+  // public widget cleanly reports "unavailable" (widget.html's existing
+  // fetch-failure handling) with no separate disabled-check needed
+  // anywhere. Re-enabling flips it back to COMPLETED.
+  DISABLED
 }
 
 enum LogStatus {

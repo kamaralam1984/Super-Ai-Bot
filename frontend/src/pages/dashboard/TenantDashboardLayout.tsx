@@ -102,7 +102,7 @@ export function TenantDashboardLayout() {
           </header>
 
           <main className="min-w-0 flex-1 px-5 py-6 sm:px-7">
-            <Outlet context={{ installation }} />
+            <Outlet context={{ installation, isTenant: true }} />
           </main>
         </div>
       </div>

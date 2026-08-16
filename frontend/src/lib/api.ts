@@ -31,6 +31,7 @@ import type {
   BackupRecordRow,
   PluginRow,
   LicenseRow,
+  TechStackSignals,
 } from "./dashboardTypes";
 
 interface ApiEnvelope<T> {
@@ -123,6 +124,9 @@ export const api = {
     logout: () => request<{ authenticated: boolean }>("/tenant/logout", { method: "POST" }),
     session: () => request<{ authenticated: boolean }>("/tenant/session"),
     installation: () => request<AdminInstallation>("/tenant/installation"),
+    disableInstallation: () => request<{ status: string }>("/tenant/installation/disable", { method: "POST" }),
+    enableInstallation: () => request<{ status: string }>("/tenant/installation/enable", { method: "POST" }),
+    techStack: () => request<{ techStack: TechStackSignals | null }>("/tenant/tech-stack"),
   },
 
   // Phase 2 — Website Auto Scanner.
@@ -208,6 +212,8 @@ export interface AdminInstallation {
   websiteName: string;
   websiteUrl: string;
   completedAt: string | null;
+  /** Only present on the tenant path (/tenant/installation) — the platform admin's own installation is always COMPLETED and never exposes this. */
+  status?: "IN_PROGRESS" | "COMPLETED" | "FAILED" | "ROLLED_BACK" | "DISABLED";
 }
 
 export { ApiError };

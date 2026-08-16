@@ -220,8 +220,103 @@ tenantAuthRouter.get("/installation", async (req, res, next) => {
       if (!installation) throw new AppError(404, "No installation found for this account", undefined, false);
       res.json({
         success: true,
-        data: { id: installation.id, installationId: installation.installationId, websiteName: installation.websiteName, websiteUrl: installation.websiteUrl, completedAt: installation.completedAt },
+        data: {
+          id: installation.id,
+          installationId: installation.installationId,
+          websiteName: installation.websiteName,
+          websiteUrl: installation.websiteUrl,
+          completedAt: installation.completedAt,
+          status: installation.status,
+        },
       });
+    } finally {
+      await prisma.$disconnect();
+    }
+  } catch (err) {
+    next(err);
+  }
+});
+
+async function requireTenantContext(req: import("express").Request): Promise<{ accountId: string; installationId: string }> {
+  const token = req.cookies?.[TENANT_SESSION_COOKIE_NAME];
+  const context = token ? await verifyTenantSessionToken(token) : null;
+  if (!context) throw new AppError(401, "Not authenticated", "Log in first.", false);
+  return context;
+}
+
+/**
+ * "Delete Chatbot" in the dashboard — a reversible pause, not a real
+ * delete. Flips status away from COMPLETED, so every lookup requiring
+ * COMPLETED (getActiveInstallationId, chat.routes.ts's /config) stops
+ * matching this row on its own — the public widget then hits its
+ * existing "Chat is not available right now" fallback (widget.html)
+ * with no separate disabled-check needed anywhere else. Nothing on the
+ * tenant's own site is touched; only this row.
+ */
+tenantAuthRouter.post("/installation/disable", async (req, res, next) => {
+  try {
+    const context = await requireTenantContext(req);
+    const databaseUrl = requireDatabaseUrl();
+    const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
+    try {
+      const installation = await prisma.installation.findUnique({ where: { accountId: context.accountId } });
+      if (!installation) throw new AppError(404, "No installation found for this account", undefined, false);
+      if (installation.status !== "COMPLETED") {
+        throw new AppError(409, "Chatbot is not currently active", "Only a completed, active chatbot can be disabled.", false);
+      }
+      await prisma.installation.update({ where: { id: installation.id }, data: { status: "DISABLED" } });
+      res.json({ success: true, data: { status: "DISABLED" } });
+    } finally {
+      await prisma.$disconnect();
+    }
+  } catch (err) {
+    next(err);
+  }
+});
+
+tenantAuthRouter.post("/installation/enable", async (req, res, next) => {
+  try {
+    const context = await requireTenantContext(req);
+    const databaseUrl = requireDatabaseUrl();
+    const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
+    try {
+      const installation = await prisma.installation.findUnique({ where: { accountId: context.accountId } });
+      if (!installation) throw new AppError(404, "No installation found for this account", undefined, false);
+      if (installation.status !== "DISABLED") {
+        throw new AppError(409, "Chatbot is not currently disabled", undefined, false);
+      }
+      await prisma.installation.update({ where: { id: installation.id }, data: { status: "COMPLETED" } });
+      res.json({ success: true, data: { status: "COMPLETED" } });
+    } finally {
+      await prisma.$disconnect();
+    }
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * Powers the "Add Chatbot" instructions panel — the tech stack detected
+ * during the tenant's own onboarding scan (scanOrchestrator.service.ts
+ * already writes this to CrawlJob.techStack for every scan; no separate
+ * detection step needed). Used to pick the right copy-paste method
+ * (plain HTML / Next.js / WordPress / generic) rather than showing every
+ * tenant the same one-size instructions.
+ */
+tenantAuthRouter.get("/tech-stack", async (req, res, next) => {
+  try {
+    const context = await requireTenantContext(req);
+    const databaseUrl = requireDatabaseUrl();
+    const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
+    try {
+      const installation = await prisma.installation.findUnique({ where: { accountId: context.accountId } });
+      if (!installation) throw new AppError(404, "No installation found for this account", undefined, false);
+      const crawlJob = await prisma.crawlJob.findFirst({
+        where: { installationId: installation.id, status: "COMPLETED" },
+        orderBy: { startedAt: "desc" },
+        select: { techStack: true },
+      });
+      res.json({ success: true, data: { techStack: crawlJob?.techStack ?? null } });
     } finally {
       await prisma.$disconnect();
     }

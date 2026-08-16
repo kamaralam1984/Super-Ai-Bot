@@ -4,6 +4,16 @@
 // dashboard — see docs/DEPLOYMENT.md and each phase's own doc for the
 // backend shapes these mirror).
 
+// Detected during the tenant's own onboarding scan (scanner/types.ts's
+// TechStackSignals) — mirrors backend/src/scanner/types.ts's shape.
+export interface TechStackSignals {
+  cms: string | null;
+  frameworks: string[];
+  server: string | null;
+  ecommerce: string | null;
+  confidence: "low" | "medium" | "high";
+}
+
 // ── Scan ─────────────────────────────────────────────────────────────────
 export interface CrawlReportOutput {
   websiteInfo: { baseUrl: string; robotsTxtFound: boolean };

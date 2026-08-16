@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { useOutletContext } from "react-router-dom";
-import { motion } from "framer-motion";
-import { Activity, Globe, Loader2, Tag, Code2, Copy, Check } from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
+import { Activity, Globe, Loader2, Tag, Code2, Copy, Check, ExternalLink, Plus, Power, AlertTriangle, ChevronDown } from "lucide-react";
 import { StepHeader } from "../../components/StepHeader";
 import { StatusIcon } from "../../components/StatusIcon";
-import { api, type AdminInstallation } from "../../lib/api";
-import type { HealthReport, VersionInfo } from "../../lib/dashboardTypes";
+import { PrimaryButton } from "../../components/PrimaryButton";
+import { api, ApiError, type AdminInstallation } from "../../lib/api";
+import type { HealthReport, VersionInfo, TechStackSignals } from "../../lib/dashboardTypes";
 
 /**
  * The embed snippet is otherwise only ever shown once, on
@@ -50,11 +51,201 @@ function WidgetEmbedCard({ installation }: { installation: AdminInstallation }) 
   );
 }
 
+/** Picks the one most relevant install method for whatever CrawlJob.techStack detected during onboarding — a tenant on WordPress sees WordPress steps, not a generic wall of every possible platform. */
+function pickInstallMethod(techStack: TechStackSignals | null): { label: string; steps: string[]; code: string } {
+  const cms = techStack?.cms?.toLowerCase() ?? "";
+  const frameworks = (techStack?.frameworks ?? []).map((f) => f.toLowerCase());
+
+  if (cms.includes("wordpress")) {
+    return {
+      label: "WordPress",
+      steps: [
+        "In your WP Admin sidebar, go to Appearance → Theme File Editor (or install the free \"Insert Headers and Footers\" plugin if theme editing is disabled).",
+        "Open footer.php (or the plugin's \"Footer\" box) and paste the snippet right before </body>.",
+        "Save. No rebuild needed — WordPress serves the change immediately.",
+      ],
+      code: `<!-- footer.php, right before </body> -->\n<script src="ORIGIN/widget.js" data-installation-id="INSTALLATION_ID"></script>`,
+    };
+  }
+  if (cms.includes("shopify")) {
+    return {
+      label: "Shopify",
+      steps: [
+        "In your Shopify admin, go to Online Store → Themes → Edit code (on your live theme).",
+        "Open layout/theme.liquid and paste the snippet right before </body>.",
+        "Save. Shopify publishes the change immediately.",
+      ],
+      code: `{{ '' }}\n<!-- layout/theme.liquid, right before </body> -->\n<script src="ORIGIN/widget.js" data-installation-id="INSTALLATION_ID"></script>`,
+    };
+  }
+  if (frameworks.some((f) => f.includes("next"))) {
+    return {
+      label: "Next.js",
+      steps: [
+        "Open your app's root layout file (app/layout.tsx for the App Router, or pages/_app.tsx for the Pages Router).",
+        "Import next/script and render it once inside <body>.",
+        "Rebuild and restart the app for the change to take effect.",
+      ],
+      code: `import Script from "next/script";\n\n<Script\n  src="ORIGIN/widget.js"\n  data-installation-id="INSTALLATION_ID"\n  strategy="lazyOnload"\n/>`,
+    };
+  }
+  return {
+    label: "Plain HTML",
+    steps: [
+      "Open the HTML file (or shared layout/template) for your site.",
+      "Paste the snippet right before the closing </body> tag.",
+      "Save and redeploy — no other configuration needed.",
+    ],
+    code: `<!-- right before </body> -->\n<script src="ORIGIN/widget.js" data-installation-id="INSTALLATION_ID"></script>`,
+  };
+}
+
+function AddChatbotPanel({ installation }: { installation: AdminInstallation }) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [techStack, setTechStack] = useState<TechStackSignals | null | undefined>(undefined);
+  const [error, setError] = useState<string | null>(null);
+
+  function toggle() {
+    const next = !open;
+    setOpen(next);
+    if (next && techStack === undefined) {
+      setLoading(true);
+      api.tenant
+        .techStack()
+        .then((res) => setTechStack(res.techStack))
+        .catch((err) => setError(err instanceof ApiError ? err.message : "Could not detect your site's platform."))
+        .finally(() => setLoading(false));
+    }
+  }
+
+  const origin = window.location.origin;
+  const method = pickInstallMethod(techStack ?? null);
+  const code = method.code.replace(/ORIGIN/g, origin).replace(/INSTALLATION_ID/g, installation.installationId);
+
+  return (
+    <div className="mb-3 rounded-xl border border-border bg-surface/60 overflow-hidden">
+      <button
+        type="button"
+        onClick={toggle}
+        className="flex w-full items-center justify-between gap-2 px-4 py-3 text-left text-sm font-medium text-ink"
+      >
+        <span className="flex items-center gap-2">
+          <Plus size={15} className="text-accent" aria-hidden="true" />
+          Add Chatbot — how to install it on {installation.websiteName}
+        </span>
+        <ChevronDown size={15} className={`text-ink-faint transition-transform ${open ? "rotate-180" : ""}`} aria-hidden="true" />
+      </button>
+      <AnimatePresence>
+        {open && (
+          <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="overflow-hidden">
+            <div className="border-t border-border px-4 py-4">
+              {loading && (
+                <div className="flex items-center gap-2 text-sm text-ink-muted">
+                  <Loader2 size={15} className="animate-spin" aria-hidden="true" /> Detecting your website's platform…
+                </div>
+              )}
+              {!loading && error && <p className="text-sm text-critical">{error}</p>}
+              {!loading && !error && (
+                <>
+                  <p className="mb-3 text-xs text-ink-muted">
+                    Detected platform: <span className="font-medium text-ink">{method.label}</span>
+                    {techStack?.confidence && <span className="text-ink-faint"> ({techStack.confidence} confidence)</span>}
+                  </p>
+                  <ol className="mb-3 list-decimal space-y-1.5 pl-5 text-sm text-ink">
+                    {method.steps.map((s, i) => (
+                      <li key={i}>{s}</li>
+                    ))}
+                  </ol>
+                  <pre className="overflow-x-auto rounded-lg border border-border bg-surface-raised/80 p-3 text-xs text-ink">{code}</pre>
+                </>
+              )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+function ChatbotControls({ installation, onStatusChange }: { installation: AdminInstallation; onStatusChange: (status: AdminInstallation["status"]) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const disabled = installation.status === "DISABLED";
+
+  function runChatbot() {
+    const separator = installation.websiteUrl.includes("?") ? "&" : "?";
+    window.open(`${installation.websiteUrl}${separator}kvl_preview=1`, "_blank", "noopener,noreferrer");
+  }
+
+  function toggleActive() {
+    if (disabled) {
+      setBusy(true);
+      api.tenant
+        .enableInstallation()
+        .then((res) => onStatusChange(res.status as AdminInstallation["status"]))
+        .finally(() => setBusy(false));
+      return;
+    }
+    if (!confirmingDelete) {
+      setConfirmingDelete(true);
+      return;
+    }
+    setBusy(true);
+    api.tenant
+      .disableInstallation()
+      .then((res) => onStatusChange(res.status as AdminInstallation["status"]))
+      .finally(() => {
+        setBusy(false);
+        setConfirmingDelete(false);
+      });
+  }
+
+  return (
+    <div className="mb-5">
+      <AddChatbotPanel installation={installation} />
+
+      <div className="flex flex-wrap items-center gap-2">
+        <PrimaryButton variant="ghost" onClick={runChatbot} className="text-sm">
+          <ExternalLink size={14} aria-hidden="true" /> Run Chatbot
+        </PrimaryButton>
+
+        {disabled && (
+          <div className="flex items-center gap-1.5 rounded-lg border border-border bg-surface-raised/60 px-2.5 py-1.5 text-xs text-ink-muted">
+            <Power size={12} aria-hidden="true" /> Disabled — visitors currently see "chat unavailable"
+          </div>
+        )}
+
+        <PrimaryButton
+          variant="ghost"
+          loading={busy}
+          onClick={toggleActive}
+          className={`text-sm ${!disabled ? "hover:border-critical/50 hover:text-critical" : ""}`}
+        >
+          <Power size={14} aria-hidden="true" />
+          {disabled ? "Enable Chatbot" : confirmingDelete ? "Click again to confirm" : "Delete Chatbot"}
+        </PrimaryButton>
+
+        {confirmingDelete && (
+          <span className="flex items-center gap-1 text-xs text-ink-faint">
+            <AlertTriangle size={12} aria-hidden="true" /> Your widget stays on your site but stops responding
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function OverviewPage() {
-  const { installation } = useOutletContext<{ installation: AdminInstallation | null }>();
+  const { installation: initialInstallation, isTenant } = useOutletContext<{ installation: AdminInstallation | null; isTenant?: boolean }>();
+  const [installation, setInstallation] = useState(initialInstallation);
   const [health, setHealth] = useState<HealthReport | null>(null);
   const [version, setVersion] = useState<VersionInfo | null>(null);
   const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setInstallation(initialInstallation);
+  }, [initialInstallation]);
 
   useEffect(() => {
     let cancelled = false;
@@ -82,6 +273,10 @@ export function OverviewPage() {
       )}
 
       {installation && <WidgetEmbedCard installation={installation} />}
+
+      {installation && isTenant && (
+        <ChatbotControls installation={installation} onStatusChange={(status) => setInstallation((prev) => (prev ? { ...prev, status } : prev))} />
+      )}
 
       {loading && (
         <div className="flex items-center gap-2 text-sm text-ink-muted">
