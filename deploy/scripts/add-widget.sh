@@ -51,10 +51,27 @@ do
     break
   fi
 done
+
+# Filename doesn't have to match the domain (e.g. a site's config file
+# is often named after the project, like "gravitypro.conf" for
+# gravitypro.kvlbusinesssolutions.com) — fall back to searching every
+# config file's actual `server_name` directive for the domain.
 if [[ -z "$conf_path" ]]; then
-  echo "No nginx site config found for '$domain' (checked sites-available/ and conf.d/)." >&2
+  for dir in /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/conf.d; do
+    [[ -d "$dir" ]] || continue
+    match="$(grep -lE "server_name[^;]*[[:space:]]${domain}([[:space:];]|\$)" "$dir"/* 2>/dev/null | head -n1 || true)"
+    if [[ -n "$match" ]]; then
+      conf_path="$match"
+      break
+    fi
+  done
+fi
+
+if [[ -z "$conf_path" ]]; then
+  echo "No nginx config found serving '$domain' (checked sites-available/, sites-enabled/, conf.d/ by filename and by server_name)." >&2
   exit 2
 fi
+echo "Found $domain in $conf_path"
 
 backup_path="${conf_path}.kvl-backup.$(date +%Y%m%d%H%M%S)"
 cp "$conf_path" "$backup_path"
