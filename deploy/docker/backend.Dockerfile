@@ -151,6 +151,9 @@ COPY --from=builder /app/backend/package.json ./backend/package.json
 # image. Without this copy, only backend/dist exists in the runtime
 # image and the process crashes on its very first request with ENOENT.
 COPY --from=builder /app/backend/src/widget ./backend/src/widget
+# Same reasoning as the widget copy above — widget.routes.ts reads this
+# .zip straight from src/ at request time too.
+COPY --from=builder /app/backend/src/integrations ./backend/src/integrations
 COPY package.json ./package.json
 
 # Every RUNTIME_DIRECTORIES entry (backend/src/config/paths.ts) as a

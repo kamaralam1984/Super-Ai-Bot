@@ -25,6 +25,12 @@ export const widgetRouter = Router();
 
 const WIDGET_JS = fs.readFileSync(path.join(BACKEND_ROOT, "src", "widget", "widget.js"), "utf-8");
 const WIDGET_HTML = fs.readFileSync(path.join(BACKEND_ROOT, "src", "widget", "widget.html"), "utf-8");
+// The same downloadable .zip for every tenant — it has no installation
+// ID baked in at all; the plugin's own settings page (Settings > KVL
+// Chatbot) is where a site owner pastes theirs after installing. See
+// integrations/wordpress/kvl-chatbot/kvl-chatbot.php (source of this
+// built artifact) for the plugin itself.
+const WORDPRESS_PLUGIN_ZIP = fs.readFileSync(path.join(BACKEND_ROOT, "src", "integrations", "kvl-chatbot-wordpress-plugin.zip"));
 
 widgetRouter.get("/widget.js", (_req, res) => {
   // helmet()'s default `Cross-Origin-Resource-Policy: same-origin` blocks a
@@ -59,4 +65,13 @@ widgetRouter.get("/widget", (_req, res) => {
   res.type("text/html");
   res.set("Cache-Control", "no-store");
   res.send(WIDGET_HTML);
+});
+
+/** Downloadable WordPress plugin — the "Add Chatbot" panel in the dashboard (frontend/src/pages/dashboard/OverviewPage.tsx) links here when the detected platform is WordPress. Public and unauthenticated for the same reason widget.js is: it has to be reachable from an arbitrary tenant's browser, not just an authenticated dashboard session. */
+widgetRouter.get("/integrations/wordpress-plugin.zip", (_req, res) => {
+  res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+  res.type("application/zip");
+  res.set("Content-Disposition", 'attachment; filename="kvl-chatbot.zip"');
+  res.set("Cache-Control", "public, max-age=300");
+  res.send(WORDPRESS_PLUGIN_ZIP);
 });

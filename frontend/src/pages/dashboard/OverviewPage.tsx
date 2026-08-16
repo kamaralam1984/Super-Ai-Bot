@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useOutletContext } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
-import { Activity, Globe, Loader2, Tag, Code2, Copy, Check, ExternalLink, Plus, Power, AlertTriangle, ChevronDown } from "lucide-react";
+import { Activity, Globe, Loader2, Tag, Code2, Copy, Check, ExternalLink, Plus, Power, AlertTriangle, ChevronDown, Download } from "lucide-react";
 import { StepHeader } from "../../components/StepHeader";
 import { StatusIcon } from "../../components/StatusIcon";
 import { PrimaryButton } from "../../components/PrimaryButton";
@@ -52,7 +52,7 @@ function WidgetEmbedCard({ installation }: { installation: AdminInstallation }) 
 }
 
 /** Picks the one most relevant install method for whatever CrawlJob.techStack detected during onboarding — a tenant on WordPress sees WordPress steps, not a generic wall of every possible platform. */
-function pickInstallMethod(techStack: TechStackSignals | null): { label: string; steps: string[]; code: string } {
+function pickInstallMethod(techStack: TechStackSignals | null): { label: string; steps: string[]; code: string | null; downloadUrl?: string } {
   const cms = techStack?.cms?.toLowerCase() ?? "";
   const frameworks = (techStack?.frameworks ?? []).map((f) => f.toLowerCase());
 
@@ -60,11 +60,12 @@ function pickInstallMethod(techStack: TechStackSignals | null): { label: string;
     return {
       label: "WordPress",
       steps: [
-        "In your WP Admin sidebar, go to Appearance → Theme File Editor (or install the free \"Insert Headers and Footers\" plugin if theme editing is disabled).",
-        "Open footer.php (or the plugin's \"Footer\" box) and paste the snippet right before </body>.",
-        "Save. No rebuild needed — WordPress serves the change immediately.",
+        "Download the KVL Chatbot plugin below.",
+        "In your WP Admin sidebar, go to Plugins → Add New → Upload Plugin, choose the downloaded .zip, then click Install Now → Activate.",
+        "Go to Settings → KVL Chatbot, paste your Installation ID (shown below), and save. No code editing, no theme changes.",
       ],
-      code: `<!-- footer.php, right before </body> -->\n<script src="ORIGIN/widget.js" data-installation-id="INSTALLATION_ID"></script>`,
+      code: null,
+      downloadUrl: "ORIGIN/integrations/wordpress-plugin.zip",
     };
   }
   if (cms.includes("shopify")) {
@@ -121,7 +122,9 @@ function AddChatbotPanel({ installation }: { installation: AdminInstallation }) 
 
   const origin = window.location.origin;
   const method = pickInstallMethod(techStack ?? null);
-  const code = method.code.replace(/ORIGIN/g, origin).replace(/INSTALLATION_ID/g, installation.installationId);
+  const fill = (s: string) => s.replace(/ORIGIN/g, origin).replace(/INSTALLATION_ID/g, installation.installationId);
+  const code = method.code ? fill(method.code) : null;
+  const downloadUrl = method.downloadUrl ? fill(method.downloadUrl) : null;
 
   return (
     <div className="mb-3 rounded-xl border border-border bg-surface/60 overflow-hidden">
@@ -157,7 +160,20 @@ function AddChatbotPanel({ installation }: { installation: AdminInstallation }) 
                       <li key={i}>{s}</li>
                     ))}
                   </ol>
-                  <pre className="overflow-x-auto rounded-lg border border-border bg-surface-raised/80 p-3 text-xs text-ink">{code}</pre>
+                  {downloadUrl && (
+                    <a
+                      href={downloadUrl}
+                      className="mb-3 inline-flex items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-xs font-medium text-accent-ink transition-colors hover:bg-accent-strong"
+                    >
+                      <Download size={13} aria-hidden="true" /> Download KVL Chatbot plugin (.zip)
+                    </a>
+                  )}
+                  {downloadUrl && (
+                    <p className="mb-3 text-xs text-ink-muted">
+                      Your Installation ID to paste into the plugin's settings: <code className="data-value rounded bg-surface-raised/80 px-1.5 py-0.5 text-ink">{installation.installationId}</code>
+                    </p>
+                  )}
+                  {code && <pre className="overflow-x-auto rounded-lg border border-border bg-surface-raised/80 p-3 text-xs text-ink">{code}</pre>}
                 </>
               )}
             </div>
