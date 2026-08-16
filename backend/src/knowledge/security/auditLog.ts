@@ -41,7 +41,8 @@ export type AuditEventType =
   | "deployment_plugin_removed"
   | "deployment_license_activated"
   | "deployment_license_activation_rejected"
-  | "deployment_license_validation_failed";
+  | "deployment_license_validation_failed"
+  | "tenant_auto_install_performed";
 
 const WARN_EVENT_TYPES = new Set<AuditEventType>([
   "access_denied",

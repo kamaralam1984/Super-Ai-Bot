@@ -1,0 +1,16 @@
+# Domain allowlist for one-click "Install Chatbot Automatically" —
+# consumed by kvl-installer-daemon.py, re-read on every request (no
+# restart needed after editing).
+#
+# Deploy this file to /etc/kvl/auto-install-domains.txt on the VPS host
+# (NOT inside the repo checkout — this is host config, not app code).
+#
+# One domain per line, no scheme/path/port — exactly the hostname a
+# tenant's "Connected website" URL resolves to. Add a domain here only
+# once you've personally verified it's hosted on THIS VPS behind this
+# host's own nginx (an /etc/nginx/sites-available/<domain> or conf.d/
+# file must already exist for it — add-widget.sh looks it up by exact
+# domain match). Lines starting with # are ignored.
+#
+# Example:
+# crm.kvlbusinesssolutions.com

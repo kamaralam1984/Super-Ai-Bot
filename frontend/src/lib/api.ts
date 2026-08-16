@@ -126,7 +126,8 @@ export const api = {
     installation: () => request<AdminInstallation>("/tenant/installation"),
     disableInstallation: () => request<{ status: string }>("/tenant/installation/disable", { method: "POST" }),
     enableInstallation: () => request<{ status: string }>("/tenant/installation/enable", { method: "POST" }),
-    techStack: () => request<{ techStack: TechStackSignals | null }>("/tenant/tech-stack"),
+    techStack: () => request<{ techStack: TechStackSignals | null; autoInstallEligible: boolean }>("/tenant/tech-stack"),
+    autoInstall: () => request<{ installed: boolean }>("/tenant/installation/auto-install", { method: "POST" }),
   },
 
   // Phase 2 — Website Auto Scanner.

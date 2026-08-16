@@ -6,6 +6,7 @@ import { TokenBucketRateLimiter } from "../knowledge/security/accessControl";
 import { recordAuditEvent } from "../knowledge/security/auditLog";
 import { generateId } from "../services/security.service";
 import { runTenantOnboarding } from "../services/tenantOnboarding.service";
+import { checkAutoInstallEligible, runAutoInstall } from "../services/autoInstall.service";
 import {
   createTenantSessionToken,
   setTenantSessionCookie,
@@ -316,7 +317,38 @@ tenantAuthRouter.get("/tech-stack", async (req, res, next) => {
         orderBy: { startedAt: "desc" },
         select: { techStack: true },
       });
-      res.json({ success: true, data: { techStack: crawlJob?.techStack ?? null } });
+      const autoInstallEligible = await checkAutoInstallEligible(installation.websiteUrl);
+      res.json({ success: true, data: { techStack: crawlJob?.techStack ?? null, autoInstallEligible } });
+    } finally {
+      await prisma.$disconnect();
+    }
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * One-click install for sites hosted on this same VPS, behind this
+ * host's own nginx — see autoInstall.service.ts and
+ * deploy/scripts/kvl-installer-daemon.py for the full mechanism and its
+ * domain-allowlist gate. Every other site still uses the manual
+ * copy-paste method /tech-stack's steps describe; this is additive, not
+ * a replacement.
+ */
+tenantAuthRouter.post("/installation/auto-install", async (req, res, next) => {
+  try {
+    const context = await requireTenantContext(req);
+    const databaseUrl = requireDatabaseUrl();
+    const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
+    try {
+      const installation = await prisma.installation.findUnique({ where: { accountId: context.accountId } });
+      if (!installation) throw new AppError(404, "No installation found for this account", undefined, false);
+      const result = await runAutoInstall(installation.websiteUrl, installation.installationId);
+      if (!result.ok) {
+        throw new AppError(422, "Automatic installation failed", result.message, true);
+      }
+      recordAuditEvent({ type: "tenant_auto_install_performed", detail: `account=${context.accountId} installation=${installation.installationId}`, component: "tenant-auto-install" });
+      res.json({ success: true, data: { installed: true } });
     } finally {
       await prisma.$disconnect();
     }

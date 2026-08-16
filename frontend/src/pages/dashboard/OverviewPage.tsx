@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useOutletContext } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
-import { Activity, Globe, Loader2, Tag, Code2, Copy, Check, ExternalLink, Plus, Power, AlertTriangle, ChevronDown, Download } from "lucide-react";
+import { Activity, Globe, Loader2, Tag, Code2, Copy, Check, ExternalLink, Plus, Power, AlertTriangle, ChevronDown, Download, Zap } from "lucide-react";
 import { StepHeader } from "../../components/StepHeader";
 import { StatusIcon } from "../../components/StatusIcon";
 import { PrimaryButton } from "../../components/PrimaryButton";
@@ -105,7 +105,11 @@ function AddChatbotPanel({ installation }: { installation: AdminInstallation }) 
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [techStack, setTechStack] = useState<TechStackSignals | null | undefined>(undefined);
+  const [autoInstallEligible, setAutoInstallEligible] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [installing, setInstalling] = useState(false);
+  const [installState, setInstallState] = useState<"idle" | "success" | "error">("idle");
+  const [installError, setInstallError] = useState<string | null>(null);
 
   function toggle() {
     const next = !open;
@@ -114,10 +118,26 @@ function AddChatbotPanel({ installation }: { installation: AdminInstallation }) 
       setLoading(true);
       api.tenant
         .techStack()
-        .then((res) => setTechStack(res.techStack))
+        .then((res) => {
+          setTechStack(res.techStack);
+          setAutoInstallEligible(res.autoInstallEligible);
+        })
         .catch((err) => setError(err instanceof ApiError ? err.message : "Could not detect your site's platform."))
         .finally(() => setLoading(false));
     }
+  }
+
+  function handleAutoInstall() {
+    setInstalling(true);
+    setInstallError(null);
+    api.tenant
+      .autoInstall()
+      .then(() => setInstallState("success"))
+      .catch((err) => {
+        setInstallState("error");
+        setInstallError(err instanceof ApiError ? err.message : "Automatic installation failed.");
+      })
+      .finally(() => setInstalling(false));
   }
 
   const origin = window.location.origin;
@@ -151,9 +171,26 @@ function AddChatbotPanel({ installation }: { installation: AdminInstallation }) 
               {!loading && error && <p className="text-sm text-critical">{error}</p>}
               {!loading && !error && (
                 <>
+                  {autoInstallEligible && installState !== "success" && (
+                    <div className="mb-4 rounded-lg border border-accent/30 bg-accent/10 p-3">
+                      <p className="mb-2 text-sm text-ink">
+                        <strong className="font-semibold">This site is hosted on our own server</strong> — install the chatbot automatically with one click, no code needed.
+                      </p>
+                      {installState === "error" && installError && <p className="mb-2 text-xs text-critical">{installError}</p>}
+                      <PrimaryButton loading={installing} onClick={handleAutoInstall} className="text-sm">
+                        <Zap size={14} aria-hidden="true" /> Install Chatbot Automatically
+                      </PrimaryButton>
+                    </div>
+                  )}
+                  {autoInstallEligible && installState === "success" && (
+                    <div className="mb-4 flex items-center gap-1.5 rounded-lg border border-success/30 bg-success/10 p-3 text-sm text-ink">
+                      <Check size={14} className="text-success" aria-hidden="true" /> Installed automatically — click Run Chatbot to see it live.
+                    </div>
+                  )}
                   <p className="mb-3 text-xs text-ink-muted">
                     Detected platform: <span className="font-medium text-ink">{method.label}</span>
                     {techStack?.confidence && <span className="text-ink-faint"> ({techStack.confidence} confidence)</span>}
+                    {autoInstallEligible && <span className="text-ink-faint"> — or use the manual method below:</span>}
                   </p>
                   <ol className="mb-3 list-decimal space-y-1.5 pl-5 text-sm text-ink">
                     {method.steps.map((s, i) => (

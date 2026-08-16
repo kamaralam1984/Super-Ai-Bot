@@ -109,6 +109,17 @@ services:
       - backend_plugins:/app/plugins
       - backend_connectors:/app/connectors
       - backend_temp:/app/temp
+      # Read/write socket to kvl-installer-daemon.py, a small privileged
+      # helper running directly on the HOST (deploy/systemd/kvl-installer.service,
+      # NOT a container) — the one narrow bridge letting a tenant's "Install
+      # Chatbot Automatically" button edit this host's own nginx config for
+      # same-VPS sites on an admin-maintained allowlist. Optional: if
+      # /run/kvl-installer doesn't exist on the host, Docker creates it as an
+      # empty directory instead of failing, and autoInstall.service.ts's
+      # socket connection attempts simply fail closed (falls back to manual
+      # install instructions) — this deployment mode works with or without
+      # the daemon installed.
+      - /run/kvl-installer:/run/kvl-installer
     depends_on:
       postgres:
         condition: service_healthy

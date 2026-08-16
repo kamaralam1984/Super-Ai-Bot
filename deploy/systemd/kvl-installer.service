@@ -1,0 +1,29 @@
+[Unit]
+Description=KVL Super AI Chatbot — same-VPS widget auto-installer (privileged helper)
+Documentation=https://github.com/your-org/kvl-super-ai-chatbot/blob/main/docs/DEPLOYMENT.md
+After=network.target nginx.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/kvl-super-ai-chatbot/deploy/scripts/kvl-installer-daemon.py
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Deliberately runs as root, unlike kvl-backend.service — its one job is
+# editing /etc/nginx and reloading it, which needs root, and every
+# request it accepts is regex-validated against an admin-maintained
+# domain allowlist before anything is executed (see the daemon's own
+# module docstring for the full threat model). NoNewPrivileges/
+# ProtectSystem=strict are deliberately NOT set here — this process's
+# entire purpose is writing outside its own directory tree.
+User=root
+Group=root
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kvl-installer
+
+[Install]
+WantedBy=multi-user.target
