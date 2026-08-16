@@ -83,7 +83,15 @@ tenantAuthRouter.post("/signup", async (req, res, next) => {
         return { account, installation };
       });
 
-      const token = await createTenantSessionToken(account.id, installation.installationId);
+      // The session claim must be Installation.id (the internal cuid every
+      // FK relation — CrawlJob, PermissionGrant, Conversation, etc. —
+      // actually points at), NOT installation.installationId (the public
+      // "inst_xxx" string, which is only ever meant for the widget embed
+      // and the signup response below). Passing the public string here
+      // was the bug: every route resolving installationId through
+      // tenantContext.ts's resolveInstallationId would receive a value
+      // that fails every foreign-key-constrained write.
+      const token = await createTenantSessionToken(account.id, installation.id);
       setTenantSessionCookie(res, token);
       res.json({ success: true, data: { accountId: account.id, installationId: installation.installationId } });
     } finally {
@@ -175,7 +183,8 @@ tenantAuthRouter.post("/login", async (req, res, next) => {
 
       await prisma.account.update({ where: { id: account.id }, data: { lastLoginAt: new Date() } });
 
-      const token = await createTenantSessionToken(account.id, account.installation.installationId);
+      // Same reasoning as /signup above — Installation.id, not the public installationId string.
+      const token = await createTenantSessionToken(account.id, account.installation.id);
       setTenantSessionCookie(res, token);
       res.json({ success: true, data: { authenticated: true } });
     } finally {
