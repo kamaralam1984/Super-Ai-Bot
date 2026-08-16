@@ -126,6 +126,15 @@ def main() -> None:
 
     socket_dir = os.path.dirname(SOCKET_PATH)
     os.makedirs(socket_dir, mode=0o750, exist_ok=True)
+    # The directory's own group must also be the backend's gid, not just
+    # the socket file's — traversing into a directory needs execute
+    # permission for *your* gid on the *directory* too, regardless of
+    # what group owns the socket file inside it.
+    try:
+        os.chown(socket_dir, 0, SOCKET_GROUP_GID)
+        os.chmod(socket_dir, 0o750)
+    except PermissionError:
+        logging.warning("could not chown socket dir to gid %s — run this daemon as root", SOCKET_GROUP_GID)
     if os.path.exists(SOCKET_PATH):
         os.remove(SOCKET_PATH)
 

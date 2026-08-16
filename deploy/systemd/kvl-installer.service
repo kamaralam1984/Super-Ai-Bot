@@ -2,14 +2,14 @@
 Description=KVL Super AI Chatbot — same-VPS widget auto-installer (privileged helper)
 Documentation=https://github.com/your-org/kvl-super-ai-chatbot/blob/main/docs/DEPLOYMENT.md
 After=network.target nginx.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
 ExecStart=/usr/bin/python3 /opt/kvl-super-ai-chatbot/deploy/scripts/kvl-installer-daemon.py
 Restart=on-failure
 RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=5
 
 # Deliberately runs as root, unlike kvl-backend.service — its one job is
 # editing /etc/nginx and reloading it, which needs root, and every
